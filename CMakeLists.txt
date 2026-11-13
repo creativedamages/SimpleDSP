@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(DualChannelDSP VERSION 0.1.0 LANGUAGES C CXX)
+project(DualChannelDSP VERSION 0.2.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -17,7 +17,7 @@ juce_add_gui_app(DualChannelDSP
   BUNDLE_ID "com.robbyapps.dualchanneldsp"
 )
 
-target_sources(DualChannelDSP PRIVATE Source/Main.cpp Source/DSP.h)
+target_sources(DualChannelDSP PRIVATE Source/Main.cpp Source/DSP.h Source/RemoteServer.h Source/RemotePage.h)
 target_compile_definitions(DualChannelDSP PRIVATE
   JUCE_ASIO=1
   JUCE_WASAPI=1

@@ -36,5 +36,44 @@ int main()
     }
     assert(std::abs(at479) < 1e-5f);
     assert(std::abs(at480 - 1.0f) < 1e-4f);
-    std::cout << "DSP passthrough, polarity, and 10ms delay tests passed.\n";
+    // The graph calculation must match the high/low-pass coefficients in the DSP.
+    settings.delayMs.store(0.0);
+    settings.invertPolarity.store(false);
+    settings.highPass.enabled.store(true);
+    settings.highPass.frequencyHz.store(1000.0);
+    settings.highPass.slopeDbPerOct.store(12);
+    const auto hp12 = responseDb(settings, 48000.0, 100.0);
+    settings.highPass.slopeDbPerOct.store(24);
+    const auto hp24 = responseDb(settings, 48000.0, 100.0);
+    assert(hp12 < -35.0 && hp24 < hp12 - 30.0);
+    settings.highPass.enabled.store(false);
+    settings.lowPass.enabled.store(true);
+    settings.lowPass.frequencyHz.store(1000.0);
+    settings.lowPass.slopeDbPerOct.store(12);
+    const auto lp12 = responseDb(settings, 48000.0, 10000.0);
+    settings.lowPass.slopeDbPerOct.store(24);
+    const auto lp24 = responseDb(settings, 48000.0, 10000.0);
+    assert(lp12 < -35.0 && lp24 < lp12 - 30.0);
+    settings.lowPass.enabled.store(false);
+    settings.eq[0].frequencyHz.store(1000.0);
+    settings.eq[0].gainDb.store(6.0);
+    assert(std::abs(responseDb(settings, 48000.0, 1000.0) - 6.0) < 0.01);
+    // Verify real-time output actually attenuates low frequencies with HPF enabled.
+    settings.eq[0].gainDb.store(0.0);
+    settings.highPass.enabled.store(true);
+    settings.highPass.frequencyHz.store(1000.0);
+    settings.highPass.slopeDbPerOct.store(12);
+    MonoProcessor highpass;
+    highpass.prepare(48000.0);
+    highpass.beginBlock(settings);
+    double energy = 0.0;
+    for (int n = 0; n < 48000; ++n)
+    {
+        const float x = static_cast<float>(std::sin(2.0 * kPi * 100.0 * n / 48000.0));
+        const float y = highpass.process(x);
+        if (n > 24000) energy += static_cast<double>(y) * y;
+    }
+    assert(std::sqrt(energy / 23999.0) < 0.01); // far below normal 0.707 sine RMS
+    settings.highPass.enabled.store(false);
+    std::cout << "DSP passthrough, polarity, 10ms delay, HP/LP slopes, and PEQ response passed.\n";
 }

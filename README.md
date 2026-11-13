@@ -1,63 +1,81 @@
-# Dual Channel DSP — Windows prototype
+# Dual Channel DSP — Windows v0.2 source
 
-Native Windows desktop app for **two independent mono paths**. No summing or cross-mixing:
+This is the updated **two-channel Windows audio processor**. Each mono signal path is independent; there is **no summing, stereo mixing, or cross-bus**. Each path has its own selectable physical input and output on a common interface/audio clock. The app rejects duplicate output routes.
 
+**This archive contains source code, not a precompiled EXE.** Use the bundled GitHub Actions workflow to build on a hosted Windows runner without installing Visual Studio. A successful Windows build and a real audio-interface hardware test have not yet been verified.
+
+## Channel signal path
+
+`Physical input -> high-pass -> six parametric EQ bands -> low-pass -> delay -> level -> polarity -> physical output`
+
+Controls per channel:
+
+- Editable channel name, saved in presets
+- Physical input and output route, individually selectable (unassigned possible)
+- Level: −90 to +18 dB, 0.1 dB steps
+- Six peaking EQs: 20–20,000 Hz, ±18 dB, Q 0.1–15
+- High-pass and low-pass, independently enabled, frequency 20–20,000 Hz, slope selectable 12 or 24 dB/oct (Butterworth biquads)
+- Live combined EQ frequency response chart (desktop and phone, 20 Hz–20 kHz, ±24 dB vertical view)
+- Delay: 0–2,000 milliseconds, 0.01 ms steps
+- Polarity inversion (Ø, −1 multiplier; not variable phase rotation)
+
+Frequency response graphs include HP/LP and all six PEQ bands. The graph excludes the overall level setting and delay. It shows calculated filter response, **not** an audio spectrum analyzer or a measured transfer function.
+
+## Presets and startup
+
+- **Save preset… / Load preset…:** save a readable `.dsp.json` file anywhere on your Windows PC, including both channel names, routes, gain, delay, polarity, and filters.
+- **Startup file…:** choose the `.dsp.json` to load automatically, then enable **Load at launch**. These app preferences remain stored on the PC.
+- **Start with Windows:** toggle autostart in the current user's Windows Run registry key. It starts **after that user signs in**, not as a pre-login system service. No admin rights are required in normal configurations. Keep the EXE in its permanent location before enabling the checkbox.
+- The last selected audio interface and buffer/rate settings are saved for the next launch using JUCE's audio-device state XML.
+- Preset routes are applied only when the current audio device matches the one used to save the preset. Otherwise routing is left unassigned to prevent accidentally driving the wrong physical outputs.
+
+App settings are stored under `%APPDATA%\RobbyApps\DualChannelDSP\` and mobile-saved presets under the `Presets` subfolder.
+
+## Mobile Wi-Fi remote
+
+When the Windows app is running, it displays an address such as `http://192.168.1.25:8765` and a **6-digit PIN**. Connect your phone to the same local/private Wi-Fi, open that address in the mobile browser, and enter the displayed PIN. The page is served by the Windows app—**no cloud account, tunnel, or separate web hosting** is needed. The phone can change both channels' routes, names, level, delay, polarity, six EQs and HP/LP settings, see both EQ graphs, and save/load presets stored on the PC.
+
+The app binds to a private IPv4 interface rather than all network adapters. If your PC has several private LAN/virtual adapters, the displayed address might correspond to the wrong one; disable unused adapters if necessary. Windows Firewall may ask permission: **allow Private networks**, not Public. Phone and PC must be able to reach each other (guest networks/client isolation will block it).
+
+**Security limitation:** the remote uses HTTP with a PIN, not encrypted HTTPS. It is intended only for trusted private Wi-Fi networks; anyone with network access and the PIN can adjust the audio. Do not forward TCP port 8765 or expose it to the Internet.
+
+## GitHub upload & no-Visual-Studio build
+
+1. Extract the entire ZIP to a normal folder. `.github` is a hidden folder on macOS; Finder **Command+Shift+.** reveals it.
+2. Update your GitHub repository with the files, preserving the exact folder structure, especially `.github/workflows/build-windows.yml`. The files in `Source/` and `tests/` must remain inside those folders. Do not add an extra enclosing directory.
+3. Open GitHub → **Actions** → **Build Windows application**. It runs on pushes to `main` or `master`, and can also be started via **Run workflow**.
+4. When the workflow succeeds, download the **Dual-Channel-DSP-Windows-x64** artifact. Extract the artifact and run `Dual Channel DSP.exe` on a 64-bit Windows 10/11 PC. No Visual Studio is needed on that PC. Install your interface's ASIO driver if using ASIO.
+5. Move the executable to its intended permanent folder before enabling **Start with Windows**.
+
+The workflow currently uses JUCE 9.0.5, Windows Server 2022 build runner, and `actions/checkout@v5`. `project(... LANGUAGES C CXX)` and non-`constexpr` JUCE color declarations avoid the earlier CMake/MSVC build failures.
+
+## Local DSP tests
+
+Pure C++ DSP regression tests can run anywhere with a C++17 compiler:
+
+```bash
+g++ -std=c++17 -O2 tests/dsp_test.cpp -o dsp_test
+./dsp_test
 ```
-Physical Input A  -> Gain -> 6 PEQ filters -> Delay -> Polarity -> Physical Output A
-Physical Input B  -> Gain -> 6 PEQ filters -> Delay -> Polarity -> Physical Output B
-```
 
-Each path has its own independently selected **physical input** and **physical output** channel on the selected audio interface. Both channels use the same audio interface/driver and sample clock. Physical **output routes cannot be assigned to both paths**, preventing accidental summation. An input may be selected by both paths if deliberate input fan-out is wanted; the two outputs remain separate.
+They check pass-through, polarity, 10ms delay, high-pass/low-pass response for 12/24 dB slopes, and 6 dB PEQ magnitude. The **Windows GUI and audio device have not been compiled or hardware-tested in this environment**; the GitHub Actions build is the integration test.
 
-## Controls
+## Safety and limitations
 
-- Per-channel input and output drop-downs, with `Unassigned` option
-- Level: **-90 to +18 dB**, 0.1 dB precision
-- **Six** independent peaking parametric EQ bands per channel, **20 Hz–20 kHz**, **-18 to +18 dB**, Q **0.1–15**
-- Delay: **0–2,000 ms**, displayed in **0.01 ms** increments; fractional delay uses linear interpolation
-- **Polarity invert** toggle (180° inversion, not variable phase rotation)
-- Audio interface, driver type, sample rate and buffer size selections through JUCE's device selector
-- ASIO enabled for Windows; WASAPI fallback
+- **Start testing with amps muted and at low audio levels.** There is no output limiter, clip protection, feedback prevention, or signal metering; large EQ boosts can clip downstream equipment.
+- Changing the audio driver, sample rate, buffer size, or physical channel masks can briefly interrupt audio. Gain, delay and polarity are ramped; filter coefficient changes are applied between audio buffers, without crossfading between EQ shapes.
+- This is an audio processing **prototype**, not a certified loudspeaker DSP. Validate phase, latency, headroom, physical channel routing, glitches, and driver restart behavior before use in a live PA system.
+- The remote is active only while the Windows app is running. Autostart is login-based and requires an interactive user session and functioning audio interface.
+- The interface and remote pages are local. No user audio is streamed to the phone; the remote sends parameters only.
+- If packaging or redistributing an ASIO-enabled build, review JUCE and Steinberg SDK licensing.
 
-The DSP processing code uses no dynamic allocations while processing audio buffers. Filter settings are updated at buffer boundaries. Gain, polarity, and delay changes are smoothed to reduce switching artifacts. This is a **prototype**; there is no clip/limiter protection, EQ response plot, preset persistence, level metering, or installer in v0.1.
+## Project files
 
-## No developer tools? Online Windows build
-
-**You do not need Visual Studio on your PC.** The included `.github/workflows/build-windows.yml` runs on a GitHub-hosted Windows build machine and uploads a Windows `.exe`. See **`BUILD_WITHOUT_VISUAL_STUDIO.md`** for steps. This package is still **source code**, not a compiled binary; the Windows GUI compilation has not been verified.
-
-## Build on Windows
-
-Requirements: Windows 10/11, Visual Studio 2022 (Desktop development with C++ workload), CMake 3.22+, Git, internet access for the initial JUCE download. Install the **manufacturer's ASIO driver** for best multi-channel interface support.
-
-1. Extract this directory.
-2. Double-click `build-windows.bat` (or use `build-windows.ps1` from PowerShell).
-3. The script generates a Visual Studio project, downloads **JUCE 9.0.5**, builds Release, runs the DSP unit tests, and lists the output `.exe` path.
-4. Open the resulting `DualChannelDSP.exe` and select the **ASIO** device type and your interface. Set driver sample rate and buffer size. Select each path's input and output independently.
-
-PowerShell can also execute the commands manually:
-
-```powershell
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Release --parallel 4
-ctest --test-dir build -C Release --output-on-failure
-```
-
-## Signal-path / safety notes
-
-- Start with level low, amp/speaker system muted, then gradually establish gain. There is **no output limiter** and six boosted PEQs can cause clipping.
-- The app always clears all available output buffers at the start of each callback; only an output's assigned path writes to it. If a physical channel is unavailable or unassigned it is silent.
-- Changing audio drivers or physical routing can briefly stop/restart the stream. Smooth DSP parameters are intended to be changed in real time.
-- The delay control is **additional digital delay only**; actual end-to-end latency also includes interface/driver input/output buffers and hardware latency.
-- Polarity inversion multiplies signal by -1; it is **not** a continuously variable all-pass phase adjustment.
-- A live audio engine can be sensitive to Windows audio driver behavior. Before use with high-level PA equipment, validate the installed ASIO interface, route mapping, glitch handling, and signal levels.
-- ASIO support uses bundled SDK headers in JUCE; check **JUCE and Steinberg ASIO licensing obligations** before distributing binaries.
-
-## Implementation notes
-
-- `Source/DSP.h` — DSP engine (six RBJ peaking biquads, ramping, fractional delay ring buffer).
-- `Source/Main.cpp` — JUCE UI and real-time audio callback.
-- `tests/dsp_test.cpp` — dependency-free DSP passthrough, polarity, and 10-ms delay tests.
-- `CMakeLists.txt` — JUCE 9.0.5 FetchContent + CMake build.
-- `build-windows.bat` — one-step Windows build and test.
-
-**Build status:** Source and DSP tests can be prepared in this environment; a native Windows executable cannot be compiled or hardware-validated here. A Windows build and real-interface test are still necessary.
+- `Source/DSP.h`: allocation-free callback DSP, biquads, response model, fractional delay
+- `Source/Main.cpp`: JUCE Windows GUI, desktop EQ graph, routing, JSON presets, preferences, Windows autostart
+- `Source/RemoteServer.h`: local PIN-protected HTTP listener and preset endpoints
+- `Source/RemotePage.h`: embedded phone-friendly HTML/CSS/JavaScript controller
+- `tests/dsp_test.cpp`: standalone audio DSP regression tests
+- `CMakeLists.txt`: JUCE project
+- `.github/workflows/build-windows.yml`: hosted Windows build + EXE artifact
+- `BUILD_WITHOUT_VISUAL_STUDIO.md`: original no-IDE build procedure

@@ -1,9 +1,11 @@
 #include <JuceHeader.h>
 #include "DSP.h"
+#include "RemoteServer.h"
 #include <array>
 #include <functional>
 #include <memory>
 #include <utility>
+#include <mutex>
 
 namespace
 {
@@ -39,7 +41,12 @@ public:
 
         // JUCE's callback arrays are packed in active-channel order, even when
         // a user selects physical channels such as input 5 and output 8.
-        // Translate the selected *physical* routes to callback indices.
+        // Translate selected physical routes to packed callback indices.
+        refreshRoutes(device);
+    }
+
+    void refreshRoutes(juce::AudioIODevice* device)
+    {
         const auto activeInputs = device != nullptr ? device->getActiveInputChannels() : juce::BigInteger{};
         const auto activeOutputs = device != nullptr ? device->getActiveOutputChannels() : juce::BigInteger{};
         for (int path = 0; path < 2; ++path)
@@ -124,6 +131,13 @@ public:
         q.onValueChange = [this] { params.q.store(q.getValue()); };
     }
 
+    void sync()
+    {
+        frequency.setValue(params.frequencyHz.load(), juce::dontSendNotification);
+        gain.setValue(params.gainDb.load(), juce::dontSendNotification);
+        q.setValue(params.q.load(), juce::dontSendNotification);
+    }
+
     void paint(juce::Graphics& g) override
     {
         g.setColour(juce::Colour(0xff2c3644));
@@ -147,6 +161,110 @@ private:
     juce::Slider frequency, gain, q;
 };
 
+class CutoffRow final : public juce::Component
+{
+public:
+    CutoffRow(const juce::String& title, dualdsp::CutoffSettings& settings) : params(settings)
+    {
+        enabled.setButtonText(title);
+        enabled.setToggleState(params.enabled.load(), juce::dontSendNotification);
+        enabled.setColour(juce::ToggleButton::tickColourId, accentColour);
+        enabled.onClick = [this]{ params.enabled.store(enabled.getToggleState()); };
+        addAndMakeVisible(enabled);
+        setupSlider(frequency, 20, 20000, 1, params.frequencyHz.load(), " Hz");
+        frequency.setSkewFactorFromMidPoint(1000.0);
+        frequency.onValueChange = [this]{ params.frequencyHz.store(frequency.getValue()); };
+        addAndMakeVisible(frequency);
+        slope.addItem("12 dB/oct", 12);
+        slope.addItem("24 dB/oct", 24);
+        slope.setSelectedId(params.slopeDbPerOct.load(), juce::dontSendNotification);
+        slope.onChange = [this]{ params.slopeDbPerOct.store(slope.getSelectedId()); };
+        addAndMakeVisible(slope);
+    }
+    void sync()
+    {
+        enabled.setToggleState(params.enabled.load(), juce::dontSendNotification);
+        frequency.setValue(params.frequencyHz.load(), juce::dontSendNotification);
+        slope.setSelectedId(params.slopeDbPerOct.load(), juce::dontSendNotification);
+    }
+    void resized() override
+    {
+        auto a = getLocalBounds().reduced(8, 4);
+        enabled.setBounds(a.removeFromTop(27).removeFromLeft(190));
+        slope.setBounds(a.removeFromRight(115).reduced(0, 2));
+        frequency.setBounds(a);
+    }
+    void paint(juce::Graphics& g) override
+    {
+        g.setColour(juce::Colour(0xff2c3644));
+        g.fillRoundedRectangle(getLocalBounds().toFloat(), 7);
+    }
+private:
+    dualdsp::CutoffSettings& params;
+    juce::ToggleButton enabled;
+    juce::Slider frequency;
+    juce::ComboBox slope;
+};
+
+class ResponseGraph final : public juce::Component
+{
+public:
+    explicit ResponseGraph(const dualdsp::ChannelSettings& p) : params(p) {}
+    void setSampleRate(double sr) { sampleRate = sr; repaint(); }
+    void paint(juce::Graphics& g) override
+    {
+        auto rect = getLocalBounds().toFloat();
+        g.setColour(juce::Colour(0xff111c28));
+        g.fillRoundedRectangle(rect, 8);
+        auto chart = rect.reduced(38.0f, 16.0f);
+        chart.removeFromBottom(12.0f);
+        const auto fx = [&](double hz) { return chart.getX() + chart.getWidth() *
+            static_cast<float>(std::log10(hz / 20.0) / 3.0); };
+        const auto fy = [&](double db) { return chart.getY() + chart.getHeight() *
+            static_cast<float>((24.0 - std::clamp(db, -24.0, 24.0)) / 48.0); };
+        g.setFont(10.0f);
+        for (int db : { -24, -12, 0, 12, 24 })
+        {
+            g.setColour(db == 0 ? juce::Colour(0xff647c90) : juce::Colour(0xff2c3b4c));
+            const auto y = fy(db);
+            g.drawHorizontalLine(static_cast<int>(y), chart.getX(), chart.getRight());
+            g.setColour(mutedColour);
+            g.drawText(juce::String(db), juce::Rectangle<int>(2, static_cast<int>(y) - 6, 32, 14),
+                       juce::Justification::centredRight);
+        }
+        for (auto hz : {20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000})
+        {
+            g.setColour(juce::Colour(0xff263b4e));
+            const auto x = fx(static_cast<double>(hz));
+            g.drawVerticalLine(static_cast<int>(x), chart.getY(), chart.getBottom());
+            if (hz == 20 || hz == 100 || hz == 1000 || hz == 10000)
+            {
+                g.setColour(mutedColour);
+                g.drawFittedText(hz >= 1000 ? juce::String(hz / 1000) + "k" : juce::String(hz),
+                    static_cast<int>(x) - 17, static_cast<int>(chart.getBottom()), 40, 14,
+                    juce::Justification::centred, 1);
+            }
+        }
+        juce::Path response;
+        for (int i = 0; i <= 220; ++i)
+        {
+            const double hz = 20.0 * std::pow(1000.0, i / 220.0);
+            const auto x = fx(hz);
+            const auto y = fy(dualdsp::responseDb(params, sampleRate, hz));
+            if (i == 0) response.startNewSubPath(x, y);
+            else response.lineTo(x, y);
+        }
+        g.setColour(accentColour);
+        g.strokePath(response, juce::PathStrokeType(2.1f));
+        g.setColour(juce::Colour(0xfff6cd70));
+        for (const auto& band : params.eq)
+            g.fillEllipse(fx(band.frequencyHz.load()) - 3.5f, fy(band.gainDb.load()) - 3.5f, 7, 7);
+    }
+private:
+    const dualdsp::ChannelSettings& params;
+    double sampleRate = 48000;
+};
+
 class ChannelStrip final : public juce::Component
 {
 public:
@@ -157,6 +275,18 @@ public:
         heading.setFont(juce::Font(juce::FontOptions(23.0f, juce::Font::bold)));
         heading.setColour(juce::Label::textColourId, juce::Colours::white);
         addAndMakeVisible(heading);
+        name.setText("Channel " + juce::String(number), false);
+        name.setInputRestrictions(40);
+        name.setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff111c28));
+        name.setColour(juce::TextEditor::textColourId, juce::Colours::white);
+        name.onTextChange = [this]{ if (onNameChange) onNameChange(channelNumber - 1, name.getText()); };
+        addAndMakeVisible(name);
+        addAndMakeVisible(graph);
+        addAndMakeVisible(hp);
+        addAndMakeVisible(lp);
+        filtersCaption.setText("HIGH-PASS / LOW-PASS", juce::dontSendNotification);
+        filtersCaption.setColour(juce::Label::textColourId, accentColour);
+        addAndMakeVisible(filtersCaption);
 
         inputCaption.setText("INPUT ROUTE", juce::dontSendNotification);
         outputCaption.setText("OUTPUT ROUTE", juce::dontSendNotification);
@@ -205,6 +335,19 @@ public:
     }
 
     std::function<void(int, bool)> onRouteChange;
+    std::function<void(int, juce::String)> onNameChange;
+
+    void sync(const juce::String& newName)
+    {
+        if (! name.hasKeyboardFocus(true)) name.setText(newName, false);
+        level.setValue(params.levelDb.load(), juce::dontSendNotification);
+        delay.setValue(params.delayMs.load(), juce::dontSendNotification);
+        polarity.setToggleState(params.invertPolarity.load(), juce::dontSendNotification);
+        hp.sync(); lp.sync();
+        for (auto& e : eqRows) e->sync();
+        graph.repaint();
+    }
+    void setGraphSampleRate(double sr) { graph.setSampleRate(sr); }
 
     void setRouteOptions(const juce::StringArray& availableInputs,
                          const juce::StringArray& availableOutputs,
@@ -238,27 +381,36 @@ public:
     void resized() override
     {
         const int w = getWidth();
-        heading.setBounds(22, 13, w - 44, 36);
+        heading.setBounds(22, 12, w - 44, 32);
+        name.setBounds(22, 48, w - 44, 31);
         const int half = (w - 56) / 2;
-        inputCaption.setBounds(22, 72, half, 19);
-        outputCaption.setBounds(34 + half, 72, half, 19);
-        input.setBounds(22, 98, half, 31);
-        output.setBounds(34 + half, 98, half, 31);
-        levelCaption.setBounds(22, 150, 110, 22);
-        delayCaption.setBounds(22, 203, 110, 22);
-        level.setBounds(131, 145, w - 153, 36);
-        delay.setBounds(131, 198, w - 153, 36);
+        inputCaption.setBounds(22, 95, half, 19);
+        outputCaption.setBounds(34 + half, 95, half, 19);
+        input.setBounds(22, 119, half, 31);
+        output.setBounds(34 + half, 119, half, 31);
+        levelCaption.setBounds(22, 169, 110, 22);
+        delayCaption.setBounds(22, 214, 110, 22);
+        level.setBounds(131, 163, w - 153, 36);
+        delay.setBounds(131, 209, w - 153, 36);
         polarity.setBounds(24, 256, w - 48, 30);
-        eqCaption.setBounds(22, 312, w - 44, 28);
-        headingLabels.setBounds(70, 344, w - 85, 22);
+        graph.setBounds(20, 296, w - 40, 205);
+        filtersCaption.setBounds(22, 510, w - 44, 27);
+        hp.setBounds(18, 541, w - 36, 70);
+        lp.setBounds(18, 619, w - 36, 70);
+        eqCaption.setBounds(22, 701, w - 44, 28);
+        headingLabels.setBounds(70, 730, w - 85, 22);
         for (int i = 0; i < dualdsp::kBands; ++i)
-            eqRows[static_cast<std::size_t>(i)]->setBounds(18, 374 + i * 65, w - 36, 59);
+            eqRows[static_cast<std::size_t>(i)]->setBounds(18, 755 + i * 65, w - 36, 59);
     }
 
 private:
     int channelNumber;
     dualdsp::ChannelSettings& params;
-    juce::Label heading, inputCaption, outputCaption, levelCaption, delayCaption, eqCaption, headingLabels;
+    juce::Label heading, inputCaption, outputCaption, levelCaption, delayCaption, eqCaption, headingLabels, filtersCaption;
+    juce::TextEditor name;
+    ResponseGraph graph { params };
+    CutoffRow hp { "High-pass enabled", params.highPass };
+    CutoffRow lp { "Low-pass enabled", params.lowPass };
     juce::ComboBox input, output;
     juce::Slider level, delay;
     juce::ToggleButton polarity;
@@ -273,13 +425,13 @@ public:
     {
         addAndMakeVisible(left);
         addAndMakeVisible(right);
-        setSize(1150, 790);
+        setSize(1150, 1190);
     }
 
     void resized() override
     {
-        left.setBounds(0, 0, 565, 780);
-        right.setBounds(585, 0, 565, 780);
+        left.setBounds(0, 0, 565, 1180);
+        right.setBounds(585, 0, 565, 1180);
     }
 
     ChannelStrip left, right;
@@ -292,69 +444,118 @@ public:
         : selector(deviceManager, 0, 64, 0, 64, false, false, false, true),
           strips(engine.parameters[0], engine.parameters[1])
     {
+        appFolder().createDirectory();
+        presetFolder().createDirectory();
+        readPreferences();
+
         title.setText("Dual Channel DSP", juce::dontSendNotification);
         title.setFont(juce::Font(juce::FontOptions(28.0f, juce::Font::bold)));
         title.setColour(juce::Label::textColourId, juce::Colours::white);
-        addAndMakeVisible(title);
-
-        subtitle.setText("Two independent mono signal paths  \u2022  no summing", juce::dontSendNotification);
+        subtitle.setText("Two independent mono paths  -  no summing", juce::dontSendNotification);
         subtitle.setColour(juce::Label::textColourId, mutedColour);
-        addAndMakeVisible(subtitle);
-
         deviceLabel.setText("AUDIO INTERFACE", juce::dontSendNotification);
         deviceLabel.setColour(juce::Label::textColourId, accentColour);
-        addAndMakeVisible(deviceLabel);
+        for (auto* l : { &title, &subtitle, &deviceLabel, &remoteInfo, &info }) addAndMakeVisible(*l);
+        remoteInfo.setColour(juce::Label::textColourId, accentColour);
+        info.setColour(juce::Label::textColourId, mutedColour);
+        info.setText("ASIO recommended for low latency. Test first with outputs muted.", juce::dontSendNotification);
+
+        savePreset.setButtonText("Save preset…");
+        loadPreset.setButtonText("Load preset…");
+        chooseStartup.setButtonText("Startup file…");
+        loadOnLaunch.setButtonText("Load at launch");
+        startWithWindows.setButtonText("Start with Windows");
+        loadOnLaunch.setToggleState(launchPreset, juce::dontSendNotification);
+        loadOnLaunch.setColour(juce::ToggleButton::tickColourId, accentColour);
+        startWithWindows.setColour(juce::ToggleButton::tickColourId, accentColour);
+       #if JUCE_WINDOWS
+        startWithWindows.setToggleState(juce::WindowsRegistry::valueExists(registryRunKey()), juce::dontSendNotification);
+       #else
+        startWithWindows.setEnabled(false);
+       #endif
+        for (auto* b : { &savePreset, &loadPreset, &chooseStartup }) addAndMakeVisible(*b);
+        for (auto* b : { &loadOnLaunch, &startWithWindows }) addAndMakeVisible(*b);
+        savePreset.onClick = [this] { browseSave(); };
+        loadPreset.onClick = [this] { browseLoad(false); };
+        chooseStartup.onClick = [this] { browseLoad(true); };
+        loadOnLaunch.onClick = [this] { launchPreset = loadOnLaunch.getToggleState(); writePreferences(); };
+        startWithWindows.onClick = [this] { toggleWindowsStartup(); };
+        chooseStartup.setTooltip(startupFile.isEmpty() ? "Choose the preset to use on launch" : startupFile);
 
         selector.setSize(295, 790);
         deviceViewport.setViewedComponent(&selector, false);
         deviceViewport.setScrollBarsShown(true, false);
-        addAndMakeVisible(deviceViewport);
         contentViewport.setViewedComponent(&strips, false);
         contentViewport.setScrollBarsShown(true, true);
+        addAndMakeVisible(deviceViewport);
         addAndMakeVisible(contentViewport);
+        strips.left.onRouteChange = [this](int changed, bool outputChanged) { routeChanged(changed, outputChanged); };
+        strips.right.onRouteChange = [this](int changed, bool outputChanged) { routeChanged(changed, outputChanged); };
+        strips.left.onNameChange = [this](int ch, juce::String n) { setName(ch, n); };
+        strips.right.onNameChange = [this](int ch, juce::String n) { setName(ch, n); };
 
-        info.setColour(juce::Label::textColourId, mutedColour);
-        info.setText("Choose an audio driver and interface. ASIO is recommended for low latency.", juce::dontSendNotification);
-        addAndMakeVisible(info);
-
-        strips.left.onRouteChange = [this](int changed, bool outputChanged)
-        { routeChanged(changed, outputChanged); };
-        strips.right.onRouteChange = [this](int changed, bool outputChanged)
-        { routeChanged(changed, outputChanged); };
-
-        const auto error = deviceManager.initialise(2, 2, nullptr, true);
-        if (error.isNotEmpty())
-            info.setText("Audio device initialization: " + error, juce::dontSendNotification);
-
+        auto savedDevice = juce::XmlDocument::parse(deviceStateFile());
+        const auto error = deviceManager.initialise(2, 2, savedDevice.get(), true);
+        if (error.isNotEmpty()) info.setText("Audio device: " + error, juce::dontSendNotification);
         updateDeviceRouting(true);
         deviceManager.addAudioCallback(&engine);
-        startTimer(700);
-        setSize(1560, 905);
+        if (launchPreset && startupFile.isNotEmpty()) loadPresetFromFile(juce::File(startupFile), false);
+        syncStrips();
+
+        const auto localIP = RemoteServer::getPrivateIPv4();
+        if (localIP.isNotEmpty())
+        {
+            const auto safe = juce::Component::SafePointer<MainComponent>(this);
+            if (remote.start(localIP, 8765, remotePin, presetFolder(),
+                [this] { return getStateJson(); },
+                [safe](const juce::var& command)
+                {
+                    juce::MessageManager::callAsync([safe, command]
+                    {
+                        if (safe != nullptr) safe->handleRemote(command);
+                    });
+                }))
+                remoteInfo.setText("PHONE: http://" + localIP + ":8765   |   PIN " + remotePin,
+                                   juce::dontSendNotification);
+            else remoteInfo.setText("Remote unavailable: TCP port 8765 already in use", juce::dontSendNotification);
+        }
+        else remoteInfo.setText("Remote unavailable: no private IPv4 interface found", juce::dontSendNotification);
+
+        startTimerHz(5);
+        setSize(1560, 925);
     }
 
     ~MainComponent() override
     {
         stopTimer();
+        remote.stop(); // Must stop requests before the engine/state is destroyed.
         deviceManager.removeAudioCallback(&engine);
+        saveAudioDeviceState();
         deviceViewport.setViewedComponent(nullptr, false);
         contentViewport.setViewedComponent(nullptr, false);
     }
 
     void paint(juce::Graphics& g) override { g.fillAll(backgroundColour); }
-
     void resized() override
     {
-        auto bounds = getLocalBounds().reduced(22);
-        auto header = bounds.removeFromTop(68);
-        title.setBounds(header.removeFromLeft(370));
-        subtitle.setBounds(header);
-
-        auto footer = bounds.removeFromBottom(37);
+        auto bounds = getLocalBounds().reduced(20);
+        auto top = bounds.removeFromTop(125);
+        auto headingRow = top.removeFromTop(40);
+        title.setBounds(headingRow.removeFromLeft(345));
+        subtitle.setBounds(headingRow);
+        auto controls = top.removeFromTop(39);
+        savePreset.setBounds(controls.removeFromLeft(114).reduced(3, 1));
+        loadPreset.setBounds(controls.removeFromLeft(114).reduced(3, 1));
+        chooseStartup.setBounds(controls.removeFromLeft(118).reduced(3, 1));
+        loadOnLaunch.setBounds(controls.removeFromLeft(145));
+        startWithWindows.setBounds(controls.removeFromLeft(188));
+        remoteInfo.setBounds(top.removeFromTop(34));
+        auto footer = bounds.removeFromBottom(36);
         info.setBounds(footer);
-        auto sidebar = bounds.removeFromLeft(319);
+        auto sidebar = bounds.removeFromLeft(315);
         deviceLabel.setBounds(sidebar.removeFromTop(28));
         deviceViewport.setBounds(sidebar.reduced(2));
-        bounds.removeFromLeft(16);
+        bounds.removeFromLeft(15);
         contentViewport.setBounds(bounds);
     }
 
@@ -364,24 +565,171 @@ private:
     juce::AudioDeviceSelectorComponent selector;
     juce::Viewport deviceViewport, contentViewport;
     StripArea strips;
-    juce::Label title, subtitle, info, deviceLabel;
+    juce::Label title, subtitle, info, deviceLabel, remoteInfo;
+    juce::TextButton savePreset, loadPreset, chooseStartup;
+    juce::ToggleButton loadOnLaunch, startWithWindows;
+    std::unique_ptr<juce::FileChooser> chooser;
+    RemoteServer remote;
+    std::array<juce::String, 2> names { "Channel 1", "Channel 2" };
+    mutable std::mutex dataMutex;
+    juce::StringArray publishedInputs, publishedOutputs;
+    juce::String publishedDevice = "No audio device";
+    std::atomic<double> graphSampleRate { 48000.0 };
+    juce::String remotePin;
+    juce::String startupFile;
+    bool launchPreset = false;
     juce::String lastDeviceIdentity;
     juce::StringArray lastInputs, lastOutputs;
     std::array<int, 2> lastValidInput { -1, -1 }, lastValidOutput { -1, -1 };
     bool suppressUpdates = false;
+
+    static juce::File appFolder()
+    {
+        return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+            .getChildFile("RobbyApps").getChildFile("DualChannelDSP");
+    }
+    static juce::File presetFolder() { return appFolder().getChildFile("Presets"); }
+    static juce::File preferenceFile() { return appFolder().getChildFile("settings.json"); }
+    static juce::File deviceStateFile() { return appFolder().getChildFile("audio-device.xml"); }
+    static juce::String registryRunKey()
+    {
+        return R"(HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run\DualChannelDSP)";
+    }
+    void readPreferences()
+    {
+        const auto preferences = juce::JSON::parse(preferenceFile().loadFileAsString());
+        if (preferences.isObject())
+        {
+            startupFile = preferences.getProperty("startupFile", {}).toString();
+            launchPreset = static_cast<bool>(preferences.getProperty("loadAtLaunch", false));
+            remotePin = preferences.getProperty("remotePin", {}).toString();
+        }
+        if (remotePin.length() != 6 || !remotePin.containsOnly("0123456789"))
+            remotePin = juce::String(juce::Random::getSystemRandom().nextInt(900000) + 100000);
+        writePreferences();
+    }
+    void writePreferences() const
+    {
+        auto obj = std::make_unique<juce::DynamicObject>();
+        obj->setProperty("startupFile", startupFile);
+        obj->setProperty("loadAtLaunch", launchPreset);
+        obj->setProperty("remotePin", remotePin);
+        preferenceFile().replaceWithText(juce::JSON::toString(juce::var(obj.release()), true));
+    }
+    void toggleWindowsStartup()
+    {
+       #if JUCE_WINDOWS
+        bool ok = false;
+        if (startWithWindows.getToggleState())
+        {
+            const auto exe = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getFullPathName();
+            ok = juce::WindowsRegistry::setValue(registryRunKey(), "\"" + exe + "\"");
+        }
+        else ok = juce::WindowsRegistry::deleteValue(registryRunKey());
+        if (!ok)
+        {
+            startWithWindows.setToggleState(!startWithWindows.getToggleState(), juce::dontSendNotification);
+            info.setText("Could not update Windows startup setting.", juce::dontSendNotification);
+        }
+       #endif
+    }
+
+    void browseSave()
+    {
+        chooser = std::make_unique<juce::FileChooser>("Save DSP preset", presetFolder(), "*.dsp.json");
+        const auto safe = juce::Component::SafePointer<MainComponent>(this);
+        chooser->launchAsync(juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles,
+            [safe](const juce::FileChooser& fc)
+            {
+                if (safe == nullptr || fc.getResult() == juce::File()) return;
+                auto file = fc.getResult();
+                if (! file.getFileName().endsWithIgnoreCase(".dsp.json"))
+                    file = file.getSiblingFile(file.getFileName() + ".dsp.json");
+                if (file.replaceWithText(safe->getStateJson()))
+                    safe->info.setText("Preset saved: " + file.getFileName(), juce::dontSendNotification);
+                else safe->info.setText("Could not save preset.", juce::dontSendNotification);
+            });
+    }
+    void browseLoad(bool forStartup)
+    {
+        chooser = std::make_unique<juce::FileChooser>(forStartup ? "Select startup preset" : "Load DSP preset",
+                                                      presetFolder(), "*.dsp.json");
+        const auto safe = juce::Component::SafePointer<MainComponent>(this);
+        chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+            [safe, forStartup](const juce::FileChooser& fc)
+            {
+                if (safe == nullptr || fc.getResult() == juce::File()) return;
+                const auto file = fc.getResult();
+                if (forStartup)
+                {
+                    safe->startupFile = file.getFullPathName();
+                    safe->chooseStartup.setTooltip(safe->startupFile);
+                    safe->launchPreset = true;
+                    safe->loadOnLaunch.setToggleState(true, juce::dontSendNotification);
+                    safe->writePreferences();
+                    safe->info.setText("Startup preset selected: " + file.getFileName(), juce::dontSendNotification);
+                }
+                else safe->loadPresetFromFile(file, true);
+            });
+    }
+    bool loadPresetFromFile(const juce::File& file, bool notify)
+    {
+        if (!file.existsAsFile() || file.getSize() > 100000)
+        {
+            if (notify) info.setText("Preset not found or too large.", juce::dontSendNotification);
+            return false;
+        }
+        const auto parsed = juce::JSON::parse(file.loadFileAsString());
+        if (!applySnapshot(parsed))
+        {
+            if (notify) info.setText("Could not read preset format.", juce::dontSendNotification);
+            return false;
+        }
+        if (notify) info.setText("Preset loaded: " + file.getFileName(), juce::dontSendNotification);
+        return true;
+    }
 
     void timerCallback() override
     {
         updateDeviceRouting(false);
         if (auto* device = deviceManager.getCurrentAudioDevice())
         {
-            info.setText(device->getTypeName() + " / " + device->getName()
-                         + "  \u2022  " + juce::String(device->getCurrentSampleRate(), 0) + " Hz"
-                         + "  \u2022  " + juce::String(device->getCurrentBufferSizeSamples()) + " samples"
-                         + "  \u2022  no summing", juce::dontSendNotification);
+            graphSampleRate.store(device->getCurrentSampleRate());
+            strips.left.setGraphSampleRate(device->getCurrentSampleRate());
+            strips.right.setGraphSampleRate(device->getCurrentSampleRate());
+            // Keep the footer informative without overwriting reported errors constantly.
         }
+        syncStrips();
+    }
+    void setName(int ch, juce::String n)
+    {
+        if (ch < 0 || ch >= 2) return;
+        std::lock_guard<std::mutex> guard(dataMutex);
+        names[static_cast<std::size_t>(ch)] = n.substring(0, 40);
+    }
+    void syncStrips()
+    {
+        juce::String n0, n1;
+        {
+            std::lock_guard<std::mutex> guard(dataMutex);
+            n0 = names[0]; n1 = names[1];
+        }
+        strips.left.sync(n0);
+        strips.right.sync(n1);
     }
 
+    void saveAudioDeviceState() const
+    {
+        if (auto xml = deviceManager.createStateXml())
+            deviceStateFile().replaceWithText(xml->toString());
+    }
+    void publishDeviceInfo()
+    {
+        std::lock_guard<std::mutex> guard(dataMutex);
+        publishedInputs = lastInputs;
+        publishedOutputs = lastOutputs;
+        publishedDevice = lastDeviceIdentity.isEmpty() ? "No audio device" : lastDeviceIdentity;
+    }
     void updateDeviceRouting(bool force)
     {
         auto* device = deviceManager.getCurrentAudioDevice();
@@ -389,16 +737,13 @@ private:
         {
             if (force || lastDeviceIdentity.isNotEmpty())
             {
-                lastDeviceIdentity.clear();
-                lastInputs.clear();
-                lastOutputs.clear();
+                lastDeviceIdentity.clear(); lastInputs.clear(); lastOutputs.clear();
                 strips.left.setRouteOptions({}, {}, -1, -1);
                 strips.right.setRouteOptions({}, {}, -1, -1);
-                publishRoutes();
+                publishRoutes(); publishDeviceInfo();
             }
             return;
         }
-
         const auto in = device->getInputChannelNames();
         const auto out = device->getOutputChannelNames();
         const auto identity = device->getTypeName() + " :: " + device->getName();
@@ -407,11 +752,7 @@ private:
         {
             suppressUpdates = true;
             lastDeviceIdentity = identity;
-            lastInputs = in;
-            lastOutputs = out;
-
-            // Preserve user patching when the same device restarts. Only default
-            // to 1->1 and 2->2 when a different interface is selected.
+            lastInputs = in; lastOutputs = out;
             const auto valid = [](int route, int count) { return route >= 0 && route < count ? route : -1; };
             const int input1 = changedInterface ? (in.size() > 0 ? 0 : -1) : valid(lastValidInput[0], in.size());
             const int input2 = changedInterface ? (in.size() > 1 ? 1 : -1) : valid(lastValidInput[1], in.size());
@@ -420,33 +761,23 @@ private:
             strips.left.setRouteOptions(in, out, input1, output1);
             strips.right.setRouteOptions(in, out, input2, output2);
             suppressUpdates = false;
-            publishRoutes();
-            applyActivePorts();
+            publishRoutes(); publishDeviceInfo(); applyActivePorts();
         }
-        else
-        {
-            // Re-enable requested ports if the driver selector changed channel masks.
-            applyActivePorts();
-        }
+        else applyActivePorts();
     }
-
-    void routeChanged(int changedIndex, bool changedOutput)
+    void routeChanged(int changedIndex, bool)
     {
         if (suppressUpdates) return;
-        auto newOutputs = std::array<int, 2> { strips.left.getOutputRoute(), strips.right.getOutputRoute() };
+        const auto newOutputs = std::array<int, 2>{ strips.left.getOutputRoute(), strips.right.getOutputRoute() };
         if (newOutputs[0] >= 0 && newOutputs[0] == newOutputs[1])
         {
             auto& changedStrip = changedIndex == 0 ? strips.left : strips.right;
             changedStrip.setOutputRoute(lastValidOutput[static_cast<std::size_t>(changedIndex)]);
-            info.setText("Output conflict: each channel requires a different physical output.",
-                         juce::dontSendNotification);
+            info.setText("Output conflict: each channel requires a different physical output.", juce::dontSendNotification);
             return;
         }
-        juce::ignoreUnused(changedOutput);
-        publishRoutes();
-        applyActivePorts();
+        publishRoutes(); applyActivePorts();
     }
-
     void publishRoutes()
     {
         lastValidInput = { strips.left.getInputRoute(), strips.right.getInputRoute() };
@@ -456,25 +787,182 @@ private:
             engine.parameters[static_cast<std::size_t>(i)].inputRoute.store(lastValidInput[static_cast<std::size_t>(i)]);
             engine.parameters[static_cast<std::size_t>(i)].outputRoute.store(lastValidOutput[static_cast<std::size_t>(i)]);
         }
+        engine.refreshRoutes(deviceManager.getCurrentAudioDevice());
     }
-
     void applyActivePorts()
     {
         if (deviceManager.getCurrentAudioDevice() == nullptr) return;
         juce::BigInteger inputs, outputs;
         for (int route : lastValidInput) if (route >= 0) inputs.setBit(route);
         for (int route : lastValidOutput) if (route >= 0) outputs.setBit(route);
-
         auto setup = deviceManager.getAudioDeviceSetup();
         if (!setup.useDefaultInputChannels && !setup.useDefaultOutputChannels
             && setup.inputChannels == inputs && setup.outputChannels == outputs)
+        {
+            engine.refreshRoutes(deviceManager.getCurrentAudioDevice());
             return;
+        }
         setup.useDefaultInputChannels = false;
         setup.useDefaultOutputChannels = false;
         setup.inputChannels = inputs;
         setup.outputChannels = outputs;
         const auto error = deviceManager.setAudioDeviceSetup(setup, true);
         if (error.isNotEmpty()) info.setText("Audio routing error: " + error, juce::dontSendNotification);
+        else saveAudioDeviceState();
+        engine.refreshRoutes(deviceManager.getCurrentAudioDevice());
+    }
+
+    juce::var snapshot() const
+    {
+        auto root = std::make_unique<juce::DynamicObject>();
+        root->setProperty("version", 2);
+        juce::Array<juce::var> channels, ins, outs;
+        std::array<juce::String, 2> safeNames;
+        juce::String device;
+        {
+            std::lock_guard<std::mutex> guard(dataMutex);
+            safeNames = names;
+            device = publishedDevice;
+            for (auto s : publishedInputs) ins.add(s);
+            for (auto s : publishedOutputs) outs.add(s);
+        }
+        root->setProperty("device", device);
+        root->setProperty("inputs", juce::var(ins));
+        root->setProperty("outputs", juce::var(outs));
+        const auto sr = graphSampleRate.load();
+        for (int i = 0; i < 2; ++i)
+        {
+            const auto& p = engine.parameters[static_cast<std::size_t>(i)];
+            auto c = std::make_unique<juce::DynamicObject>();
+            c->setProperty("name", safeNames[static_cast<std::size_t>(i)]);
+            c->setProperty("inputRoute", p.inputRoute.load());
+            c->setProperty("outputRoute", p.outputRoute.load());
+            c->setProperty("levelDb", p.levelDb.load());
+            c->setProperty("delayMs", p.delayMs.load());
+            c->setProperty("invertPolarity", p.invertPolarity.load());
+            juce::Array<juce::var> bands, curve;
+            for (const auto& band : p.eq)
+            {
+                auto b = std::make_unique<juce::DynamicObject>();
+                b->setProperty("frequencyHz", band.frequencyHz.load());
+                b->setProperty("gainDb", band.gainDb.load());
+                b->setProperty("q", band.q.load());
+                bands.add(juce::var(b.release()));
+            }
+            c->setProperty("eq", juce::var(bands));
+            const auto cutoff = [](const dualdsp::CutoffSettings& f) -> juce::var
+            {
+                auto o = std::make_unique<juce::DynamicObject>();
+                o->setProperty("enabled", f.enabled.load());
+                o->setProperty("frequency", f.frequencyHz.load());
+                o->setProperty("slope", f.slopeDbPerOct.load());
+                return juce::var(o.release());
+            };
+            c->setProperty("highPass", cutoff(p.highPass));
+            c->setProperty("lowPass", cutoff(p.lowPass));
+            for (int n = 0; n < 128; ++n)
+                curve.add(dualdsp::responseDb(p, sr, 20.0 * std::pow(1000.0, n / 127.0)));
+            c->setProperty("curve", juce::var(curve));
+            channels.add(juce::var(c.release()));
+        }
+        root->setProperty("channels", juce::var(channels));
+        return juce::var(root.release());
+    }
+    juce::String getStateJson() const { return juce::JSON::toString(snapshot()); }
+
+    bool applySnapshot(const juce::var& state)
+    {
+        const auto v = state.getProperty("channels", {});
+        if (!v.isArray() || v.getArray()->size() != 2) return false;
+        std::array<int, 2> pendingInput { -1,-1 }, pendingOutput { -1,-1 };
+        const bool matchingDevice = state.getProperty("device", {}).toString() == lastDeviceIdentity;
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            const auto c = v[ch];
+            if (!c.isObject()) return false;
+            const auto idx = static_cast<std::size_t>(ch);
+            auto& p = engine.parameters[idx];
+            setName(ch, c.getProperty("name", juce::String("Channel ") + juce::String(ch+1)).toString());
+            p.levelDb.store(std::clamp(static_cast<double>(c.getProperty("levelDb", 0.0)), -90.0, 18.0));
+            p.delayMs.store(std::clamp(static_cast<double>(c.getProperty("delayMs", 0.0)), 0.0, dualdsp::kMaxDelayMs));
+            p.invertPolarity.store(static_cast<bool>(c.getProperty("invertPolarity", false)));
+            const auto bands = c.getProperty("eq", {});
+            if (bands.isArray())
+                for (int b = 0; b < dualdsp::kBands && b < bands.getArray()->size(); ++b)
+                {
+                    const auto entry = bands[b];
+                    auto& eq = p.eq[static_cast<std::size_t>(b)];
+                    eq.frequencyHz.store(std::clamp(static_cast<double>(entry.getProperty("frequencyHz", 1000.0)), 20.0, 20000.0));
+                    eq.gainDb.store(std::clamp(static_cast<double>(entry.getProperty("gainDb", 0.0)), -18.0, 18.0));
+                    eq.q.store(std::clamp(static_cast<double>(entry.getProperty("q", 1.0)), 0.1, 15.0));
+                }
+            const auto setCutoff = [](dualdsp::CutoffSettings& f, const juce::var& x)
+            {
+                if (!x.isObject()) return;
+                f.enabled.store(static_cast<bool>(x.getProperty("enabled", false)));
+                f.frequencyHz.store(std::clamp(static_cast<double>(x.getProperty("frequency", 80.0)), 20.0, 20000.0));
+                f.slopeDbPerOct.store(static_cast<int>(x.getProperty("slope", 12)) == 24 ? 24 : 12);
+            };
+            setCutoff(p.highPass, c.getProperty("highPass", {}));
+            setCutoff(p.lowPass, c.getProperty("lowPass", {}));
+            if (matchingDevice)
+            {
+                const int rIn = static_cast<int>(c.getProperty("inputRoute", -1));
+                const int rOut = static_cast<int>(c.getProperty("outputRoute", -1));
+                pendingInput[idx] = rIn >= 0 && rIn < lastInputs.size() ? rIn : -1;
+                pendingOutput[idx] = rOut >= 0 && rOut < lastOutputs.size() ? rOut : -1;
+            }
+        }
+        if (pendingOutput[0] >= 0 && pendingOutput[0] == pendingOutput[1]) pendingOutput[1] = -1;
+        suppressUpdates = true;
+        strips.left.setInputRoute(pendingInput[0]); strips.right.setInputRoute(pendingInput[1]);
+        strips.left.setOutputRoute(pendingOutput[0]); strips.right.setOutputRoute(pendingOutput[1]);
+        suppressUpdates = false;
+        publishRoutes(); applyActivePorts(); syncStrips();
+        if (!matchingDevice)
+            info.setText("Preset DSP loaded. Routes left unassigned (different audio interface).", juce::dontSendNotification);
+        return true;
+    }
+    void handleRemote(const juce::var& command)
+    {
+        if (command.hasProperty("channels")) { applySnapshot(command); return; }
+        const int ch = static_cast<int>(command.getProperty("channel", -1));
+        if (ch < 0 || ch > 1) return;
+        const auto key = command.getProperty("key", {}).toString();
+        const auto value = command.getProperty("value", {});
+        const auto index = static_cast<std::size_t>(ch);
+        auto& p = engine.parameters[index];
+        const auto numerical = static_cast<double>(value);
+        if (key == "name") setName(ch, value.toString());
+        else if (key == "levelDb") p.levelDb.store(std::clamp(numerical, -90.0, 18.0));
+        else if (key == "delayMs") p.delayMs.store(std::clamp(numerical, 0.0, dualdsp::kMaxDelayMs));
+        else if (key == "invertPolarity") p.invertPolarity.store(static_cast<bool>(value));
+        else if (key == "inputRoute" || key == "outputRoute")
+        {
+            const int route = static_cast<int>(value);
+            const bool isOut = key == "outputRoute";
+            if (route < -1 || route >= (isOut ? lastOutputs.size() : lastInputs.size())) return;
+            auto& strip = ch == 0 ? strips.left : strips.right;
+            if (isOut) strip.setOutputRoute(route); else strip.setInputRoute(route);
+            routeChanged(ch, isOut);
+        }
+        else if (key.startsWith("highPass.") || key.startsWith("lowPass."))
+        {
+            auto& f = key.startsWith("highPass.") ? p.highPass : p.lowPass;
+            if (key.endsWith(".enabled")) f.enabled.store(static_cast<bool>(value));
+            else if (key.endsWith(".frequency")) f.frequencyHz.store(std::clamp(numerical, 20.0, 20000.0));
+            else if (key.endsWith(".slope")) f.slopeDbPerOct.store(numerical == 24 ? 24 : 12);
+        }
+        else
+        {
+            const int band = static_cast<int>(command.getProperty("band", -1));
+            if (band < 0 || band >= dualdsp::kBands) return;
+            auto& f = p.eq[static_cast<std::size_t>(band)];
+            if (key == "frequencyHz") f.frequencyHz.store(std::clamp(numerical, 20.0, 20000.0));
+            else if (key == "gainDb") f.gainDb.store(std::clamp(numerical, -18.0, 18.0));
+            else if (key == "q") f.q.store(std::clamp(numerical, 0.1, 15.0));
+        }
+        syncStrips();
     }
 };
 
@@ -482,7 +970,7 @@ class DualChannelApp final : public juce::JUCEApplication
 {
 public:
     const juce::String getApplicationName() override { return "Dual Channel DSP"; }
-    const juce::String getApplicationVersion() override { return "0.1.0"; }
+    const juce::String getApplicationVersion() override { return "0.2.0"; }
     bool moreThanOneInstanceAllowed() override { return false; }
 
     void initialise(const juce::String&) override
