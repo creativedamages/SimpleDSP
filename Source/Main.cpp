@@ -7,10 +7,10 @@
 
 namespace
 {
-constexpr auto backgroundColour = juce::Colour(0xff131820);
-constexpr auto panelColour = juce::Colour(0xff222b38);
-constexpr auto mutedColour = juce::Colour(0xffa7b4c6);
-constexpr auto accentColour = juce::Colour(0xff65cad8);
+const auto backgroundColour = juce::Colour(0xff131820);
+const auto panelColour = juce::Colour(0xff222b38);
+const auto mutedColour = juce::Colour(0xffa7b4c6);
+const auto accentColour = juce::Colour(0xff65cad8);
 
 void setupSlider(juce::Slider& slider, double low, double high, double step,
                  double initial, const juce::String& suffix)
