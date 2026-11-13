@@ -1,11 +1,14 @@
 #pragma once
 #include <JuceHeader.h>
 #include "RemotePage.h"
+#include <SimpleDSPResources.h>
 #include <atomic>
 #include <functional>
 #include <memory>
 #include <thread>
 #include <string>
+#include <future>
+#include <chrono>
 
 // One small built-in HTTP listener for a trusted private Wi-Fi network.
 // This never opens a tunnel or binds a public/Internet-facing address.
@@ -14,13 +17,19 @@ class RemoteServer final
 public:
     using Snapshot = std::function<juce::String()>;
     using Change = std::function<void(const juce::var&)>;
+    // Called by the server worker, returns true only AFTER the GUI persisted
+    // and acknowledged the selected startup preset.
+    using SelectStartup = std::function<bool(const juce::File&)>;
 
     bool start(const juce::String& address, int port, const juce::String& sixDigitPin,
-               juce::File presetDirectory, Snapshot getState, Change applyState)
+               bool pinRequired, juce::File presetDirectory, Snapshot getState,
+               Change applyState, SelectStartup selectStartupPreset)
     {
         stop();
         state = std::move(getState);
         change = std::move(applyState);
+        selectStartup = std::move(selectStartupPreset);
+        requiresPin.store(pinRequired);
         presets = std::move(presetDirectory);
         presets.createDirectory();
         pin = sixDigitPin;
@@ -43,6 +52,7 @@ public:
         listener.reset();
     }
     ~RemoteServer() { stop(); }
+    void setPinRequired(bool enabled) noexcept { requiresPin.store(enabled); }
 
     static juce::String getPrivateIPv4()
     {
@@ -143,10 +153,33 @@ private:
         {
             send(client, 200, kRemotePage, "text/html; charset=utf-8"); return;
         }
-        bool authorised = false;
-        for (auto line : juce::StringArray::fromLines(headers))
-            if (line.trimStart().startsWithIgnoreCase("X-DSP-PIN:"))
-                authorised = line.fromFirstOccurrenceOf(":", false, false).trim() == pin;
+        if (method == "GET" && path == "/favicon-32.png")
+        {
+            send(client, 200, std::string(SimpleDSPAssets::favicon_32_png, SimpleDSPAssets::favicon_32_pngSize), "image/png"); return;
+        }
+        if (method == "GET" && path == "/apple-touch-icon.png")
+        {
+            send(client, 200, std::string(SimpleDSPAssets::apple_touch_icon_png, SimpleDSPAssets::apple_touch_icon_pngSize), "image/png"); return;
+        }
+        if (method == "GET" && path == "/icon-192.png")
+        {
+            send(client, 200, std::string(SimpleDSPAssets::icon_192_png, SimpleDSPAssets::icon_192_pngSize), "image/png"); return;
+        }
+        if (method == "GET" && path == "/icon-512.png")
+        {
+            send(client, 200, std::string(SimpleDSPAssets::icon_512_png, SimpleDSPAssets::icon_512_pngSize), "image/png"); return;
+        }
+        if (method == "GET" && path == "/manifest.webmanifest")
+        {
+            send(client, 200,
+                R"JSON({"name":"Simple DSP","short_name":"Simple DSP","start_url":"/","scope":"/","display":"standalone","background_color":"#111821","theme_color":"#111821","icons":[{"src":"/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any maskable"},{"src":"/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}]})JSON",
+                "application/manifest+json"); return;
+        }
+        bool authorised = !requiresPin.load();
+        if (!authorised)
+            for (auto line : juce::StringArray::fromLines(headers))
+                if (line.trimStart().startsWithIgnoreCase("X-DSP-PIN:"))
+                    authorised = line.fromFirstOccurrenceOf(":", false, false).trim() == pin;
         if (!authorised) { send(client, 401, jsonError("PIN required"), "application/json"); return; }
         if (method == "GET" && path == "/api/state")
         {
@@ -162,7 +195,8 @@ private:
             send(client, 200, utf8(juce::JSON::toString(juce::var(o.release()))), "application/json");
             return;
         }
-        if (method != "POST" || (path != "/api/set" && path != "/api/save" && path != "/api/load"))
+        if (method != "POST" || (path != "/api/set" && path != "/api/save"
+                                  && path != "/api/load" && path != "/api/startup"))
         { send(client, 404, jsonError("Not found"), "application/json"); return; }
         const auto payload = juce::JSON::parse(juce::String::fromUTF8(request.data() + headerEnd, contentLength));
         if (!payload.isObject()) { send(client, 400, jsonError("Invalid JSON"), "application/json"); return; }
@@ -181,8 +215,22 @@ private:
             return;
         }
         if (!file.existsAsFile()) { send(client, 404, jsonError("Preset not found"), "application/json"); return; }
+        if (file.getSize() > 100000) { send(client, 400, jsonError("Preset too large"), "application/json"); return; }
         const auto loaded = juce::JSON::parse(file.loadFileAsString());
-        if (!loaded.isObject()) { send(client, 400, jsonError("Corrupt preset"), "application/json"); return; }
+        const auto channels = loaded.getProperty("channels", {});
+        if (!loaded.isObject() || !channels.isArray() || channels.getArray()->size() != 2)
+        { send(client, 400, jsonError("Corrupt preset"), "application/json"); return; }
+        if (path == "/api/startup")
+        {
+            if (!selectStartup || !selectStartup(file))
+            { send(client, 500, jsonError("Windows app could not confirm startup preset"), "application/json"); return; }
+            auto result = std::make_unique<juce::DynamicObject>();
+            result->setProperty("ok", true);
+            result->setProperty("name", name);
+            result->setProperty("loadAtLaunch", true);
+            send(client, 200, utf8(juce::JSON::toString(juce::var(result.release()))), "application/json");
+            return;
+        }
         change(loaded);
         send(client, 202, "{\"ok\":true}", "application/json");
     }
@@ -191,6 +239,8 @@ private:
     std::atomic<bool> active { false };
     Snapshot state;
     Change change;
+    SelectStartup selectStartup;
     juce::File presets;
     juce::String pin;
+    std::atomic<bool> requiresPin { true };
 };

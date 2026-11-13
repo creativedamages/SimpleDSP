@@ -36,6 +36,13 @@ int main()
     }
     assert(std::abs(at479) < 1e-5f);
     assert(std::abs(at480 - 1.0f) < 1e-4f);
+    // Delay requests beyond the supported range must be clamped by DSP.
+    static_assert(kMaxDelayMs == 500.0, "Delay ceiling must be 500 ms");
+    settings.delayMs.store(9999.0);
+    processor.prepare(48000.0);
+    processor.beginBlock(settings);
+    // The ramp settles at no more than the 500 ms buffer length.
+    for (int n = 0; n < 26000; ++n) processor.process(0.0f);
     // The graph calculation must match the high/low-pass coefficients in the DSP.
     settings.delayMs.store(0.0);
     settings.invertPolarity.store(false);

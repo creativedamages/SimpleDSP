@@ -1,12 +1,34 @@
-# Build and download the Windows app without installing development software
+# Build Simple DSP on GitHub (no local Visual Studio needed)
 
-The project includes a **GitHub Actions build workflow**. GitHub runs the Microsoft compiler on a Windows build machine. **Visual Studio is not required on your PC.**
+The package contains source files and the GitHub Actions workflow, **not** a finished Windows executable.
 
-1. Sign in to [GitHub](https://github.com/) (free account works for a public repository) and create a new repository, e.g. `dual-channel-dsp`. **Do not initialize it with a README**, so the upload page remains simple.
-2. Extract this ZIP. In the repository, choose **uploading an existing file** and upload the extracted files and folders, **including `.github/workflows/build-windows.yml`**. Commit the upload to the default branch. If GitHub's web uploader omits the hidden `.github` directory, create `.github/workflows/build-windows.yml` using GitHub's **Add file > Create new file** menu and paste the workflow content from the ZIP.
-3. Click **Actions** > **Build Windows application** > **Run workflow** (if it wasn't automatically run by the upload). The Windows runner downloads JUCE, compiles the application, and runs tests.
-4. Open the completed Actions run. Under **Artifacts**, download `Dual-Channel-DSP-Windows-x64` and extract it. Double-click **Dual Channel DSP.exe**.
+1. Extract `SimpleDSP_v0_3_GitHub_Update.zip`.
+2. In your existing `creativedamages/SimpleDSP` repository, replace existing files with **everything inside the extracted folder**, preserving this structure:
 
-**Important:** The Windows GUI build has not been run in this environment, so the first CI build may reveal a Windows/JUCE compilation issue. No Windows binary is included in the supplied ZIP. A green build verifies compilation and DSP unit tests, **not** correct physical I/O mapping or PA safety with your specific audio interface.
+   ```text
+   .github/workflows/build-windows.yml
+   Source/DSP.h
+   Source/Main.cpp
+   Source/RemotePage.h
+   Source/RemoteServer.h
+   tests/dsp_test.cpp
+   assets/SimpleDSP.ico
+   assets/SimpleDSP-Original.png
+   assets/apple-touch-icon.png
+   assets/favicon-32.png
+   assets/icon-192.png
+   assets/icon-256.png
+   assets/icon-512.png
+   CMakeLists.txt
+   README.md
+   BUILD_WITHOUT_VISUAL_STUDIO.md
+   build-windows.bat
+   build-windows.ps1
+   ```
 
-For ASIO, first install the manufacturer's Windows driver. Select ASIO in the app; assign one physical input and one *different* output to each mono processing channel. There is no summing and no output limiter; test with amplifiers muted and levels down.
+3. Commit the replacements to the default branch (`main`). On macOS, Finder can show the hidden `.github` folder using **Command+Shift+.**.
+4. Go to **Actions → Build Windows application**. Either use the new run started by the commit or **Run workflow**.
+5. When the run is green, open it and download the artifact called **SimpleDSP-Windows-x64**. Extract and run `Simple DSP.exe` on Windows 10/11 x64.
+6. Keep the EXE in a stable location before enabling **Start with Windows**.
+
+If the GitHub build is red, open the earliest failing step and examine its compiler errors. The Windows app has not yet been compiled or hardware-tested here. Existing `.dsp.json` presets and the startup configuration are intentionally preserved in `%APPDATA%\RobbyApps\DualChannelDSP\`.

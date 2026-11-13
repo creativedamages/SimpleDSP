@@ -3,6 +3,8 @@
 #include "RemoteServer.h"
 #include <array>
 #include <functional>
+#include <future>
+#include <chrono>
 #include <memory>
 #include <utility>
 #include <mutex>
@@ -271,7 +273,7 @@ public:
     ChannelStrip(int number, dualdsp::ChannelSettings& channelParams)
         : channelNumber(number), params(channelParams)
     {
-        heading.setText("CHANNEL " + juce::String(number), juce::dontSendNotification);
+        heading.setText("CH " + juce::String(number), juce::dontSendNotification);
         heading.setFont(juce::Font(juce::FontOptions(23.0f, juce::Font::bold)));
         heading.setColour(juce::Label::textColourId, juce::Colours::white);
         addAndMakeVisible(heading);
@@ -375,14 +377,14 @@ public:
         g.setColour(panelColour);
         g.fillRoundedRectangle(getLocalBounds().toFloat(), 13.0f);
         g.setColour(accentColour.withAlpha(0.65f));
-        g.fillRoundedRectangle(20.0f, 53.0f, static_cast<float>(getWidth() - 40), 2.0f, 1.0f);
+        g.fillRoundedRectangle(20.0f, 87.0f, static_cast<float>(getWidth() - 40), 2.0f, 1.0f);
     }
 
     void resized() override
     {
         const int w = getWidth();
-        heading.setBounds(22, 12, w - 44, 32);
-        name.setBounds(22, 48, w - 44, 31);
+        heading.setBounds(22, 18, 108, 37);
+        name.setBounds(132, 18, w - 154, 34);
         const int half = (w - 56) / 2;
         inputCaption.setBounds(22, 95, half, 19);
         outputCaption.setBounds(34 + half, 95, half, 19);
@@ -448,10 +450,10 @@ public:
         presetFolder().createDirectory();
         readPreferences();
 
-        title.setText("Dual Channel DSP", juce::dontSendNotification);
+        title.setText("Simple DSP", juce::dontSendNotification);
         title.setFont(juce::Font(juce::FontOptions(28.0f, juce::Font::bold)));
         title.setColour(juce::Label::textColourId, juce::Colours::white);
-        subtitle.setText("Two independent mono paths  -  no summing", juce::dontSendNotification);
+        subtitle.setText("Independent mono processing  -  no summing", juce::dontSendNotification);
         subtitle.setColour(juce::Label::textColourId, mutedColour);
         deviceLabel.setText("AUDIO INTERFACE", juce::dontSendNotification);
         deviceLabel.setColour(juce::Label::textColourId, accentColour);
@@ -465,20 +467,73 @@ public:
         chooseStartup.setButtonText("Startup file…");
         loadOnLaunch.setButtonText("Load at launch");
         startWithWindows.setButtonText("Start with Windows");
+        pinRequiredToggle.setButtonText("Require remote PIN");
+        pinRequiredToggle.setColour(juce::ToggleButton::tickColourId, accentColour);
+        pinRequiredToggle.setToggleState(pinRequired, juce::dontSendNotification);
+        pinRequiredToggle.onClick = [this]
+        {
+            pinRequired = pinRequiredToggle.getToggleState();
+            if (writePreferences())
+            {
+                remote.setPinRequired(pinRequired);
+                publishStartupSettings();
+                updateRemoteLabel();
+                info.setText(pinRequired ? "Remote PIN enabled." : "Remote PIN disabled. Use trusted private Wi-Fi only.", juce::dontSendNotification);
+            }
+            else
+            {
+                pinRequired = !pinRequired;
+                pinRequiredToggle.setToggleState(pinRequired, juce::dontSendNotification);
+                info.setText("Could not save remote PIN setting.", juce::dontSendNotification);
+            }
+        };
         loadOnLaunch.setToggleState(launchPreset, juce::dontSendNotification);
         loadOnLaunch.setColour(juce::ToggleButton::tickColourId, accentColour);
         startWithWindows.setColour(juce::ToggleButton::tickColourId, accentColour);
        #if JUCE_WINDOWS
-        startWithWindows.setToggleState(juce::WindowsRegistry::valueExists(registryRunKey()), juce::dontSendNotification);
+        // Preserve and migrate any v0.2 autostart entry to the new app name.
+        if (juce::WindowsRegistry::valueExists(legacyRegistryRunKey()))
+        {
+            if (!juce::WindowsRegistry::valueExists(registryRunKey()))
+            {
+                const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getFullPathName();
+                if (juce::WindowsRegistry::setValue(registryRunKey(), "\"" + executable + "\""))
+                    juce::WindowsRegistry::deleteValue(legacyRegistryRunKey());
+            }
+            else juce::WindowsRegistry::deleteValue(legacyRegistryRunKey());
+        }
+        startWithWindows.setToggleState(juce::WindowsRegistry::valueExists(registryRunKey())
+                                   || juce::WindowsRegistry::valueExists(legacyRegistryRunKey()),
+                                   juce::dontSendNotification);
        #else
         startWithWindows.setEnabled(false);
        #endif
         for (auto* b : { &savePreset, &loadPreset, &chooseStartup }) addAndMakeVisible(*b);
-        for (auto* b : { &loadOnLaunch, &startWithWindows }) addAndMakeVisible(*b);
+        for (auto* b : { &loadOnLaunch, &startWithWindows, &pinRequiredToggle }) addAndMakeVisible(*b);
+        startupStatus.setColour(juce::Label::textColourId, accentColour);
+        addAndMakeVisible(startupStatus);
+        publishStartupSettings();
+        updateStartupStatus();
         savePreset.onClick = [this] { browseSave(); };
         loadPreset.onClick = [this] { browseLoad(false); };
         chooseStartup.onClick = [this] { browseLoad(true); };
-        loadOnLaunch.onClick = [this] { launchPreset = loadOnLaunch.getToggleState(); writePreferences(); };
+        loadOnLaunch.onClick = [this]
+        {
+            const bool before = launchPreset;
+            launchPreset = loadOnLaunch.getToggleState();
+            if (!writePreferences())
+            {
+                launchPreset = before;
+                loadOnLaunch.setToggleState(before, juce::dontSendNotification);
+                info.setText("Could not save load-at-launch setting.", juce::dontSendNotification);
+            }
+            else
+            {
+                publishStartupSettings();
+                updateStartupStatus();
+                info.setText(launchPreset ? "Load at launch setting confirmed." : "Load at launch disabled.", juce::dontSendNotification);
+            }
+        };
         startWithWindows.onClick = [this] { toggleWindowsStartup(); };
         chooseStartup.setTooltip(startupFile.isEmpty() ? "Choose the preset to use on launch" : startupFile);
 
@@ -502,11 +557,11 @@ public:
         if (launchPreset && startupFile.isNotEmpty()) loadPresetFromFile(juce::File(startupFile), false);
         syncStrips();
 
-        const auto localIP = RemoteServer::getPrivateIPv4();
-        if (localIP.isNotEmpty())
+        remoteAddress = RemoteServer::getPrivateIPv4();
+        if (remoteAddress.isNotEmpty())
         {
             const auto safe = juce::Component::SafePointer<MainComponent>(this);
-            if (remote.start(localIP, 8765, remotePin, presetFolder(),
+            const bool started = remote.start(remoteAddress, 8765, remotePin, pinRequired, presetFolder(),
                 [this] { return getStateJson(); },
                 [safe](const juce::var& command)
                 {
@@ -514,10 +569,29 @@ public:
                     {
                         if (safe != nullptr) safe->handleRemote(command);
                     });
-                }))
-                remoteInfo.setText("PHONE: http://" + localIP + ":8765   |   PIN " + remotePin,
-                                   juce::dontSendNotification);
-            else remoteInfo.setText("Remote unavailable: TCP port 8765 already in use", juce::dontSendNotification);
+                },
+                [safe](const juce::File& file) -> bool
+                {
+                    // The server waits for a *persisted* desktop selection before
+                    // responding to the mobile remote with a success status.
+                    auto promise = std::make_shared<std::promise<bool>>();
+                    auto future = promise->get_future();
+                    if (!juce::MessageManager::callAsync([safe, file, promise]
+                    {
+                        bool confirmed = false;
+                        if (safe != nullptr) confirmed = safe->setStartupFromRemote(file);
+                        promise->set_value(confirmed);
+                    })) return false;
+                    if (future.wait_for(std::chrono::seconds(5)) != std::future_status::ready)
+                        return false;
+                    return future.get();
+                });
+            if (!started)
+            {
+                remoteAddress.clear();
+                remoteInfo.setText("Remote unavailable: TCP port 8765 already in use", juce::dontSendNotification);
+            }
+            else updateRemoteLabel();
         }
         else remoteInfo.setText("Remote unavailable: no private IPv4 interface found", juce::dontSendNotification);
 
@@ -539,7 +613,7 @@ public:
     void resized() override
     {
         auto bounds = getLocalBounds().reduced(20);
-        auto top = bounds.removeFromTop(125);
+        auto top = bounds.removeFromTop(159);
         auto headingRow = top.removeFromTop(40);
         title.setBounds(headingRow.removeFromLeft(345));
         subtitle.setBounds(headingRow);
@@ -548,7 +622,9 @@ public:
         loadPreset.setBounds(controls.removeFromLeft(114).reduced(3, 1));
         chooseStartup.setBounds(controls.removeFromLeft(118).reduced(3, 1));
         loadOnLaunch.setBounds(controls.removeFromLeft(145));
-        startWithWindows.setBounds(controls.removeFromLeft(188));
+        startWithWindows.setBounds(controls.removeFromLeft(175));
+        pinRequiredToggle.setBounds(controls.removeFromLeft(190));
+        startupStatus.setBounds(top.removeFromTop(34));
         remoteInfo.setBounds(top.removeFromTop(34));
         auto footer = bounds.removeFromBottom(36);
         info.setBounds(footer);
@@ -565,9 +641,9 @@ private:
     juce::AudioDeviceSelectorComponent selector;
     juce::Viewport deviceViewport, contentViewport;
     StripArea strips;
-    juce::Label title, subtitle, info, deviceLabel, remoteInfo;
+    juce::Label title, subtitle, info, deviceLabel, remoteInfo, startupStatus;
     juce::TextButton savePreset, loadPreset, chooseStartup;
-    juce::ToggleButton loadOnLaunch, startWithWindows;
+    juce::ToggleButton loadOnLaunch, startWithWindows, pinRequiredToggle;
     std::unique_ptr<juce::FileChooser> chooser;
     RemoteServer remote;
     std::array<juce::String, 2> names { "Channel 1", "Channel 2" };
@@ -576,8 +652,13 @@ private:
     juce::String publishedDevice = "No audio device";
     std::atomic<double> graphSampleRate { 48000.0 };
     juce::String remotePin;
+    juce::String remoteAddress;
     juce::String startupFile;
+    juce::String publishedStartupPreset;
+    bool publishedLoadAtLaunch = false;
+    bool publishedPinRequired = true;
     bool launchPreset = false;
+    bool pinRequired = true;
     juce::String lastDeviceIdentity;
     juce::StringArray lastInputs, lastOutputs;
     std::array<int, 2> lastValidInput { -1, -1 }, lastValidOutput { -1, -1 };
@@ -593,6 +674,10 @@ private:
     static juce::File deviceStateFile() { return appFolder().getChildFile("audio-device.xml"); }
     static juce::String registryRunKey()
     {
+        return R"(HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run\SimpleDSP)";
+    }
+    static juce::String legacyRegistryRunKey()
+    {
         return R"(HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run\DualChannelDSP)";
     }
     void readPreferences()
@@ -603,18 +688,72 @@ private:
             startupFile = preferences.getProperty("startupFile", {}).toString();
             launchPreset = static_cast<bool>(preferences.getProperty("loadAtLaunch", false));
             remotePin = preferences.getProperty("remotePin", {}).toString();
+            pinRequired = static_cast<bool>(preferences.getProperty("remotePinRequired", true));
         }
         if (remotePin.length() != 6 || !remotePin.containsOnly("0123456789"))
             remotePin = juce::String(juce::Random::getSystemRandom().nextInt(900000) + 100000);
         writePreferences();
     }
-    void writePreferences() const
+    bool writePreferences() const
     {
         auto obj = std::make_unique<juce::DynamicObject>();
         obj->setProperty("startupFile", startupFile);
         obj->setProperty("loadAtLaunch", launchPreset);
         obj->setProperty("remotePin", remotePin);
-        preferenceFile().replaceWithText(juce::JSON::toString(juce::var(obj.release()), true));
+        obj->setProperty("remotePinRequired", pinRequired);
+        if (!preferenceFile().replaceWithText(juce::JSON::toString(juce::var(obj.release()), true)))
+            return false;
+        const auto saved = juce::JSON::parse(preferenceFile().loadFileAsString());
+        return saved.isObject()
+            && saved.getProperty("startupFile", {}).toString() == startupFile
+            && static_cast<bool>(saved.getProperty("loadAtLaunch", false)) == launchPreset
+            && static_cast<bool>(saved.getProperty("remotePinRequired", true)) == pinRequired;
+    }
+    void publishStartupSettings()
+    {
+        std::lock_guard<std::mutex> lock(dataMutex);
+        publishedStartupPreset = startupFile.isEmpty() ? juce::String() : juce::File(startupFile).getFileName();
+        if (publishedStartupPreset.endsWithIgnoreCase(".dsp.json"))
+            publishedStartupPreset = publishedStartupPreset.dropLastCharacters(9);
+        publishedLoadAtLaunch = launchPreset;
+        publishedPinRequired = pinRequired;
+    }
+    void updateStartupStatus()
+    {
+        const auto filename = startupFile.isEmpty() ? juce::String() : juce::File(startupFile).getFileName();
+        startupStatus.setText(filename.isEmpty() ? "Load at launch: no preset selected"
+                : launchPreset ? "Load at launch: " + filename + "  (selected and saved)"
+                               : "Load at launch: OFF  |  Selected: " + filename,
+                juce::dontSendNotification);
+        chooseStartup.setTooltip(filename.isEmpty() ? "Choose the preset to use on launch" : startupFile);
+    }
+    void updateRemoteLabel()
+    {
+        remoteInfo.setText("PHONE: http://" + remoteAddress + ":8765  |  "
+                           + (pinRequired ? "PIN required: " + remotePin : "PIN off (trusted Wi-Fi only)"),
+                           juce::dontSendNotification);
+    }
+    bool setStartupFromRemote(const juce::File& file)
+    {
+        if (!file.existsAsFile() || file.getSize() > 100000) return false;
+        const auto parsed = juce::JSON::parse(file.loadFileAsString());
+        const auto v = parsed.getProperty("channels", {});
+        if (!parsed.isObject() || !v.isArray() || v.getArray()->size() != 2) return false;
+        const auto previousFile = startupFile;
+        const auto previousLoad = launchPreset;
+        startupFile = file.getFullPathName();
+        launchPreset = true;
+        if (!writePreferences())
+        {
+            startupFile = previousFile;
+            launchPreset = previousLoad;
+            return false;
+        }
+        loadOnLaunch.setToggleState(true, juce::dontSendNotification);
+        publishStartupSettings();
+        updateStartupStatus();
+        info.setText("Confirmed startup preset from phone: " + file.getFileName(), juce::dontSendNotification);
+        return true;
     }
     void toggleWindowsStartup()
     {
@@ -624,8 +763,17 @@ private:
         {
             const auto exe = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getFullPathName();
             ok = juce::WindowsRegistry::setValue(registryRunKey(), "\"" + exe + "\"");
+            if (ok && juce::WindowsRegistry::valueExists(legacyRegistryRunKey()))
+                juce::WindowsRegistry::deleteValue(legacyRegistryRunKey());
         }
-        else ok = juce::WindowsRegistry::deleteValue(registryRunKey());
+        else
+        {
+            const bool currentOk = !juce::WindowsRegistry::valueExists(registryRunKey())
+                || juce::WindowsRegistry::deleteValue(registryRunKey());
+            const bool oldOk = !juce::WindowsRegistry::valueExists(legacyRegistryRunKey())
+                || juce::WindowsRegistry::deleteValue(legacyRegistryRunKey());
+            ok = currentOk && oldOk;
+        }
         if (!ok)
         {
             startWithWindows.setToggleState(!startWithWindows.getToggleState(), juce::dontSendNotification);
@@ -662,12 +810,8 @@ private:
                 const auto file = fc.getResult();
                 if (forStartup)
                 {
-                    safe->startupFile = file.getFullPathName();
-                    safe->chooseStartup.setTooltip(safe->startupFile);
-                    safe->launchPreset = true;
-                    safe->loadOnLaunch.setToggleState(true, juce::dontSendNotification);
-                    safe->writePreferences();
-                    safe->info.setText("Startup preset selected: " + file.getFileName(), juce::dontSendNotification);
+                    if (!safe->setStartupFromRemote(file))
+                        safe->info.setText("Could not save startup preset.", juce::dontSendNotification);
                 }
                 else safe->loadPresetFromFile(file, true);
             });
@@ -826,6 +970,17 @@ private:
             for (auto s : publishedInputs) ins.add(s);
             for (auto s : publishedOutputs) outs.add(s);
         }
+        juce::String selectedStartup;
+        bool startupEnabled, remotePinEnabled;
+        {
+            std::lock_guard<std::mutex> guard(dataMutex);
+            selectedStartup = publishedStartupPreset;
+            startupEnabled = publishedLoadAtLaunch;
+            remotePinEnabled = publishedPinRequired;
+        }
+        root->setProperty("startupPresetName", selectedStartup);
+        root->setProperty("loadAtLaunch", startupEnabled);
+        root->setProperty("remotePinRequired", remotePinEnabled);
         root->setProperty("device", device);
         root->setProperty("inputs", juce::var(ins));
         root->setProperty("outputs", juce::var(outs));
@@ -966,11 +1121,11 @@ private:
     }
 };
 
-class DualChannelApp final : public juce::JUCEApplication
+class SimpleDSPApp final : public juce::JUCEApplication
 {
 public:
-    const juce::String getApplicationName() override { return "Dual Channel DSP"; }
-    const juce::String getApplicationVersion() override { return "0.2.0"; }
+    const juce::String getApplicationName() override { return "Simple DSP"; }
+    const juce::String getApplicationVersion() override { return "0.3.0"; }
     bool moreThanOneInstanceAllowed() override { return false; }
 
     void initialise(const juce::String&) override
@@ -1000,7 +1155,7 @@ private:
     {
     public:
         MainWindow()
-            : juce::DocumentWindow("Dual Channel DSP", backgroundColour,
+            : juce::DocumentWindow("Simple DSP", backgroundColour,
                                    juce::DocumentWindow::allButtons)
         {
             setUsingNativeTitleBar(true);
@@ -1020,4 +1175,4 @@ private:
 };
 } // namespace
 
-START_JUCE_APPLICATION(DualChannelApp)
+START_JUCE_APPLICATION(SimpleDSPApp)

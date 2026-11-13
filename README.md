@@ -1,81 +1,76 @@
-# Dual Channel DSP — Windows v0.2 source
+# Simple DSP — Windows application v0.3
 
-This is the updated **two-channel Windows audio processor**. Each mono signal path is independent; there is **no summing, stereo mixing, or cross-bus**. Each path has its own selectable physical input and output on a common interface/audio clock. The app rejects duplicate output routes.
+**Simple DSP** is a locally running JUCE-based Windows audio processor with two separate mono processing paths today. The branding does not specify a channel count because more channels may be added in a future update.
 
-**This archive contains source code, not a precompiled EXE.** Use the bundled GitHub Actions workflow to build on a hosted Windows runner without installing Visual Studio. A successful Windows build and a real audio-interface hardware test have not yet been verified.
+**This download is the full source project, not a precompiled Windows EXE.** The included GitHub Actions workflow builds the EXE online, so Visual Studio is not required on your own PC. The GUI and live audio hardware still need Windows build and device validation.
 
-## Channel signal path
+## Updates in v0.3
 
-`Physical input -> high-pass -> six parametric EQ bands -> low-pass -> delay -> level -> polarity -> physical output`
+- Renamed the app title, executable, workflow artifact and mobile remote to **Simple DSP**.
+- Bundled the neon *Simple DSP* icon with the Windows application (`ICON_BIG` and `ICON_SMALL`) and the Wi-Fi page (favicon, Apple Home Screen icon, Android Home Screen icons and web app manifest). All are embedded in the EXE and served locally; no website host is required.
+- Reduced the **delay maximum to 500 ms** everywhere: DSP engine, desktop slider, phone slider and preset imports. Older preset delays above this limit are clamped to 500 ms when loaded.
+- Put **CH 1 / CH 2 next to editable names** on the Windows and mobile interfaces.
+- Added a desktop **Require remote PIN** checkbox. Enabled by default to preserve older security behavior. You can disable it for a trusted local network; this choice survives restart. When disabled, a previously cached invalid phone PIN does not block access.
+- Simplified the mobile page: no bottom explanatory text.
+- Added **Set as load-at-launch** on the phone for a preset selected from the saved-presets list. The HTTP API waits for the Windows app to write and re-read its preference file before responding successfully. Both interfaces display the selected startup preset; the Windows footer also confirms the selection.
+- Retained the legacy settings/presets folder and existing startup-file selection rather than erasing or moving them. Existing Windows startup registry settings migrate to the SimpleDSP Run entry.
 
-Controls per channel:
+## Current channel processing
 
-- Editable channel name, saved in presets
-- Physical input and output route, individually selectable (unassigned possible)
-- Level: −90 to +18 dB, 0.1 dB steps
-- Six peaking EQs: 20–20,000 Hz, ±18 dB, Q 0.1–15
-- High-pass and low-pass, independently enabled, frequency 20–20,000 Hz, slope selectable 12 or 24 dB/oct (Butterworth biquads)
-- Live combined EQ frequency response chart (desktop and phone, 20 Hz–20 kHz, ±24 dB vertical view)
-- Delay: 0–2,000 milliseconds, 0.01 ms steps
-- Polarity inversion (Ø, −1 multiplier; not variable phase rotation)
+`Selected physical input → high-pass → 6 parametric EQs → low-pass → delay → level → polarity → selected physical output`
 
-Frequency response graphs include HP/LP and all six PEQ bands. The graph excludes the overall level setting and delay. It shows calculated filter response, **not** an audio spectrum analyzer or a measured transfer function.
+- Two entirely independent mono paths. **No summing or mixing.** Output assignments must be different.
+- Each path has its own selectable input and output, name, output level (-90 to +18 dB), delay (0–500 ms, 0.01 ms steps), and polarity inversion.
+- Six peaking parametric bands per channel (20 Hz–20 kHz, gain ±18 dB, Q 0.1–15), plus independently enabled 12/24 dB/oct high-pass and low-pass filters.
+- Calculated EQ magnitude curves are plotted on desktop and on the mobile controller. This is **not** an audio spectrum analyzer, real-time measurement or transfer-function tool.
 
-## Presets and startup
+## Presets: backward compatibility and confirmation
 
-- **Save preset… / Load preset…:** save a readable `.dsp.json` file anywhere on your Windows PC, including both channel names, routes, gain, delay, polarity, and filters.
-- **Startup file…:** choose the `.dsp.json` to load automatically, then enable **Load at launch**. These app preferences remain stored on the PC.
-- **Start with Windows:** toggle autostart in the current user's Windows Run registry key. It starts **after that user signs in**, not as a pre-login system service. No admin rights are required in normal configurations. Keep the EXE in its permanent location before enabling the checkbox.
-- The last selected audio interface and buffer/rate settings are saved for the next launch using JUCE's audio-device state XML.
-- Preset routes are applied only when the current audio device matches the one used to save the preset. Otherwise routing is left unassigned to prevent accidentally driving the wrong physical outputs.
+Presets remain readable `.dsp.json` files. The legacy path is **intentionally retained**:
 
-App settings are stored under `%APPDATA%\RobbyApps\DualChannelDSP\` and mobile-saved presets under the `Presets` subfolder.
+`%APPDATA%\RobbyApps\DualChannelDSP\`
 
-## Mobile Wi-Fi remote
+This preserves existing `settings.json`, `audio-device.xml`, and the `Presets` directory from the earlier Dual Channel DSP versions. The app name changes, but the storage location does not. Desktop presets saved to arbitrary other directories are also still loadable via **Load preset…**. Presets saved on the phone are in the `Presets` folder.
 
-When the Windows app is running, it displays an address such as `http://192.168.1.25:8765` and a **6-digit PIN**. Connect your phone to the same local/private Wi-Fi, open that address in the mobile browser, and enter the displayed PIN. The page is served by the Windows app—**no cloud account, tunnel, or separate web hosting** is needed. The phone can change both channels' routes, names, level, delay, polarity, six EQs and HP/LP settings, see both EQ graphs, and save/load presets stored on the PC.
+Old preset files preserve their channel names, six EQ bands, HP/LP filters, gain, polarity, and routing information; only delay values above 500 ms change on load. A saved routing arrangement is only applied when the selected audio device matches the device recorded in the preset. A preset must contain two channels for the current build. The previously configured startup preset remains selected and loads when **Load at launch** is enabled and the file exists.
 
-The app binds to a private IPv4 interface rather than all network adapters. If your PC has several private LAN/virtual adapters, the displayed address might correspond to the wrong one; disable unused adapters if necessary. Windows Firewall may ask permission: **allow Private networks**, not Public. Phone and PC must be able to reach each other (guest networks/client isolation will block it).
+**Desktop:** Choose **Startup file…** to select a saved `.dsp.json`. The desktop immediately displays `Load at launch: <filename> (selected and saved)` only after preferences were written and checked. Disable/enable load-at-launch using its checkbox.
 
-**Security limitation:** the remote uses HTTP with a PIN, not encrypted HTTPS. It is intended only for trusted private Wi-Fi networks; anyone with network access and the PIN can adjust the audio. Do not forward TCP port 8765 or expose it to the Internet.
+**Phone:** Select an entry from **Saved presets**, then tap **Set as load-at-launch**. The button responds only after the Windows application confirms persistence; both the phone status and desktop selection update. This does *not* itself load that preset immediately. To load it right now, separately select **Load preset**.
 
-## GitHub upload & no-Visual-Studio build
+## Phone remote, icons and PIN
 
-1. Extract the entire ZIP to a normal folder. `.github` is a hidden folder on macOS; Finder **Command+Shift+.** reveals it.
-2. Update your GitHub repository with the files, preserving the exact folder structure, especially `.github/workflows/build-windows.yml`. The files in `Source/` and `tests/` must remain inside those folders. Do not add an extra enclosing directory.
-3. Open GitHub → **Actions** → **Build Windows application**. It runs on pushes to `main` or `master`, and can also be started via **Run workflow**.
-4. When the workflow succeeds, download the **Dual-Channel-DSP-Windows-x64** artifact. Extract the artifact and run `Dual Channel DSP.exe` on a 64-bit Windows 10/11 PC. No Visual Studio is needed on that PC. Install your interface's ASIO driver if using ASIO.
-5. Move the executable to its intended permanent folder before enabling **Start with Windows**.
+Start the Windows app, then connect your phone to the **same private LAN/Wi-Fi** and open the displayed `http://<local-Windows-IP>:8765` URL. The remote webpage is hosted inside the application. Windows Firewall may prompt you: allow only **Private** networks. Do **not** forward TCP 8765 to the Internet.
 
-The workflow currently uses JUCE 9.0.5, Windows Server 2022 build runner, and `actions/checkout@v5`. `project(... LANGUAGES C CXX)` and non-`constexpr` JUCE color declarations avoid the earlier CMake/MSVC build failures.
+On iPhone, open the URL in Safari, choose **Share → Add to Home Screen**. On Android, use Chrome's **Add to Home screen / Install app** menu. The Home Screen icon and browser favicon use the same **Simple DSP** icon as the Windows app. If a previous Home Screen shortcut shows an older icon, remove it and add it again so the device refreshes cached artwork.
 
-## Local DSP tests
+The remote uses **unencrypted HTTP**; without a PIN, anybody on the reachable network can control the processing parameters. The PIN is optional because this is intended for trusted local Wi-Fi only. There is no cloud connection, remote public server, or audio streaming to the phone.
 
-Pure C++ DSP regression tests can run anywhere with a C++17 compiler:
+## Windows launch at sign-in
 
-```bash
-g++ -std=c++17 -O2 tests/dsp_test.cpp -o dsp_test
-./dsp_test
-```
+The **Start with Windows** checkbox creates a per-user Windows Run entry pointing at the current EXE. It starts after you sign into Windows, **not** before login. Move the executable to its permanent location first. An earlier `DualChannelDSP` registry entry is migrated to `SimpleDSP` when possible.
 
-They check pass-through, polarity, 10ms delay, high-pass/low-pass response for 12/24 dB slopes, and 6 dB PEQ magnitude. The **Windows GUI and audio device have not been compiled or hardware-tested in this environment**; the GitHub Actions build is the integration test.
+## GitHub build without Visual Studio
 
-## Safety and limitations
+1. Extract the ZIP. Upload all its contents to the **root** of your existing SimpleDSP GitHub repo, preserving `Source/`, `tests/`, `assets/` and the hidden `.github/workflows/` directory. Replace older files. Do not upload a ZIP or an extra parent folder.
+2. Go to GitHub → **Actions → Build Windows application**. A push to `main`/`master` should trigger the workflow, or use **Run workflow**.
+3. If the run succeeds, download the **SimpleDSP-Windows-x64** artifact. Extract it and run `Simple DSP.exe` on Windows 10/11 (x64). No Visual Studio installation is needed on that computer.
 
-- **Start testing with amps muted and at low audio levels.** There is no output limiter, clip protection, feedback prevention, or signal metering; large EQ boosts can clip downstream equipment.
-- Changing the audio driver, sample rate, buffer size, or physical channel masks can briefly interrupt audio. Gain, delay and polarity are ramped; filter coefficient changes are applied between audio buffers, without crossfading between EQ shapes.
-- This is an audio processing **prototype**, not a certified loudspeaker DSP. Validate phase, latency, headroom, physical channel routing, glitches, and driver restart behavior before use in a live PA system.
-- The remote is active only while the Windows app is running. Autostart is login-based and requires an interactive user session and functioning audio interface.
-- The interface and remote pages are local. No user audio is streamed to the phone; the remote sends parameters only.
-- If packaging or redistributing an ASIO-enabled build, review JUCE and Steinberg SDK licensing.
+If GitHub reports an error, open the failed run and inspect the first red build step; this project cannot be Windows-built in the current Linux environment.
 
-## Project files
+## Tests and safety
 
-- `Source/DSP.h`: allocation-free callback DSP, biquads, response model, fractional delay
-- `Source/Main.cpp`: JUCE Windows GUI, desktop EQ graph, routing, JSON presets, preferences, Windows autostart
-- `Source/RemoteServer.h`: local PIN-protected HTTP listener and preset endpoints
-- `Source/RemotePage.h`: embedded phone-friendly HTML/CSS/JavaScript controller
-- `tests/dsp_test.cpp`: standalone audio DSP regression tests
-- `CMakeLists.txt`: JUCE project
-- `.github/workflows/build-windows.yml`: hosted Windows build + EXE artifact
-- `BUILD_WITHOUT_VISUAL_STUDIO.md`: original no-IDE build procedure
+The dependency-free DSP tests can be run with `g++ -std=c++17 -O2 tests/dsp_test.cpp -o dsp_test && ./dsp_test`. They cover unity processing, polarity inversion, delay, delay ceiling, high/low-pass slopes, filter response, and PEQ magnitudes. The mobile JavaScript can be checked with `node --check` after extracting the script from `Source/RemotePage.h`.
+
+**Prototype limitations:** Windows UI, ASIO/WASAPI routing, and hardware audio have not been verified in this environment. Always begin with amps muted, level low, and a test signal. There is no output limiter, clipping protection, feedback safeguard, or measured system latency guarantee. Consult JUCE and ASIO licensing if redistributing a binary.
+
+## Project contents
+
+- `Source/DSP.h`: per-channel real-time processing and calculated EQ magnitude response
+- `Source/Main.cpp`: Windows GUI, routes, presets, autostart, and phone-state sync
+- `Source/RemoteServer.h`: local-only HTTP listener, optional PIN, and preset endpoints
+- `Source/RemotePage.h`: embedded mobile control GUI (HTML/CSS/JavaScript)
+- `assets/`: Windows ICO, image master, and mobile favicon/Home Screen PNGs
+- `CMakeLists.txt`: JUCE compilation, application icon and embedded web assets
+- `.github/workflows/build-windows.yml`: cloud Windows build, tests, downloadable EXE
+- `tests/dsp_test.cpp`: DSP regression tests

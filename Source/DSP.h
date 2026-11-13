@@ -11,7 +11,7 @@ namespace dualdsp
 {
 constexpr int kChannels = 2;
 constexpr int kBands = 6;
-constexpr double kMaxDelayMs = 2000.0;
+constexpr double kMaxDelayMs = 500.0;
 constexpr double kPi = 3.1415926535897932384626433832795;
 
 struct EqSettings
