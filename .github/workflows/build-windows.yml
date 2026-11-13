@@ -1,0 +1,59 @@
+name: Build Windows application
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v4
+
+      - name: Configure JUCE project
+        shell: pwsh
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
+
+      - name: Build Windows application and DSP tests
+        shell: pwsh
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Run DSP tests
+        shell: pwsh
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package runnable app
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path package | Out-Null
+          $exe = Get-ChildItem -Path build -Recurse -File -Filter '*.exe' |
+            Where-Object { $_.Name -eq 'Dual Channel DSP.exe' -or $_.Name -eq 'DualChannelDSP.exe' } |
+            Select-Object -First 1
+          if (-not $exe) { throw 'The Windows app executable was not found after compiling.' }
+          Copy-Item $exe.FullName -Destination 'package/Dual Channel DSP.exe'
+          @'
+          DUAL CHANNEL DSP - WINDOWS PROTOTYPE
+
+          Run "Dual Channel DSP.exe" on Windows 10/11 (64-bit).
+          No Visual Studio, compiler or .NET runtime is required on your PC.
+          ASIO requires your audio interface manufacturer's Windows driver.
+          Choose your driver, then choose distinct output channels for CH1 and CH2.
+          No summing or cross-mixing is performed by the application.
+
+          NOT PRODUCTION-VALIDATED: first test at low level with speakers muted.
+          No output limiter or clipping protection is implemented.
+          '@ | Set-Content -Path 'package/READ_ME_FIRST.txt' -Encoding UTF8
+
+      - name: Attach ready-to-download Windows app
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dual-Channel-DSP-Windows-x64
+          path: package/
+          if-no-files-found: error
+          retention-days: 30
