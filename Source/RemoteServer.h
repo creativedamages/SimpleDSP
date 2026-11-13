@@ -101,6 +101,31 @@ private:
         }
     }
     static std::string utf8(juce::String s) { return s.toStdString(); }
+    // Resolve binary resources by their ORIGINAL filenames rather than relying
+    // on JUCE's generated C++ identifiers, which strip punctuation such as '-'.
+    // This keeps all icons embedded in the EXE and available to mobile clients.
+    static void sendPngAsset(juce::StreamingSocket& client, const char* filename)
+    {
+        for (int i = 0; i < SimpleDSPAssets::namedResourceListSize; ++i)
+        {
+            const juce::String original(SimpleDSPAssets::originalFilenames[i]);
+            if (! original.endsWithIgnoreCase(filename))
+                continue;
+
+            int byteCount = 0;
+            const char* data = SimpleDSPAssets::getNamedResource(
+                SimpleDSPAssets::namedResourceList[i], byteCount);
+            if (data != nullptr && byteCount > 0)
+            {
+                send(client, 200,
+                     std::string(data, static_cast<std::size_t>(byteCount)),
+                     "image/png");
+                return;
+            }
+        }
+        send(client, 404, jsonError("Icon resource not found"), "application/json");
+    }
+
     static std::string jsonError(const juce::String& err)
     {
         auto obj = std::make_unique<juce::DynamicObject>();
@@ -155,19 +180,19 @@ private:
         }
         if (method == "GET" && path == "/favicon-32.png")
         {
-            send(client, 200, std::string(SimpleDSPAssets::favicon_32_png, SimpleDSPAssets::favicon_32_pngSize), "image/png"); return;
+            sendPngAsset(client, "favicon-32.png"); return;
         }
         if (method == "GET" && path == "/apple-touch-icon.png")
         {
-            send(client, 200, std::string(SimpleDSPAssets::apple_touch_icon_png, SimpleDSPAssets::apple_touch_icon_pngSize), "image/png"); return;
+            sendPngAsset(client, "apple-touch-icon.png"); return;
         }
         if (method == "GET" && path == "/icon-192.png")
         {
-            send(client, 200, std::string(SimpleDSPAssets::icon_192_png, SimpleDSPAssets::icon_192_pngSize), "image/png"); return;
+            sendPngAsset(client, "icon-192.png"); return;
         }
         if (method == "GET" && path == "/icon-512.png")
         {
-            send(client, 200, std::string(SimpleDSPAssets::icon_512_png, SimpleDSPAssets::icon_512_pngSize), "image/png"); return;
+            sendPngAsset(client, "icon-512.png"); return;
         }
         if (method == "GET" && path == "/manifest.webmanifest")
         {
