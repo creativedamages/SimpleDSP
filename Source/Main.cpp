@@ -556,6 +556,7 @@ public:
         : selector(deviceManager, 0, 64, 0, 64, false, false, false, true),
           strips(engine.parameters[0], engine.parameters[1])
     {
+        for (auto& spectrum : publishedRta) spectrum.fill(-96.0f);
         appFolder().createDirectory();
         presetFolder().createDirectory();
         readPreferences();
@@ -673,6 +674,7 @@ public:
             const auto safe = juce::Component::SafePointer<MainComponent>(this);
             const bool started = remote.start(remoteAddress, 8765, remotePin, pinRequired, presetFolder(),
                 [this] { return getStateJson(); },
+                [this] { return getTelemetryJson(); },
                 [safe](const juce::var& command)
                 {
                     juce::MessageManager::callAsync([safe, command]
@@ -705,7 +707,7 @@ public:
         }
         else remoteInfo.setText("Remote unavailable: no private IPv4 interface found", juce::dontSendNotification);
 
-        startTimerHz(5);
+        startTimerHz(12);
         setSize(1560, 925);
     }
 
@@ -748,6 +750,11 @@ public:
 private:
     juce::AudioDeviceManager deviceManager;
     AudioEngine engine;
+    std::array<dualdsp::SpectrumAnalyzer, 2> spectrumAnalyzers;
+    std::array<dualdsp::LiveLevels, 2> displayLevels;
+    mutable std::mutex liveMutex;
+    std::array<dualdsp::LiveLevels, 2> publishedLevels;
+    std::array<std::array<float, dualdsp::kRtaBins>, 2> publishedRta {};
     juce::AudioDeviceSelectorComponent selector;
     juce::Viewport deviceViewport, contentViewport;
     StripArea strips;
@@ -953,6 +960,28 @@ private:
             strips.right.setGraphSampleRate(device->getCurrentSampleRate());
             // Keep the footer informative without overwriting reported errors constantly.
         }
+
+        // Only the GUI timer performs FFT analysis, keeping the audio callback
+        // free of transforms, allocations, socket operations and locks.
+        const auto sr = graphSampleRate.load();
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            const auto i = static_cast<std::size_t>(ch);
+            spectrumAnalyzers[i].update(engine.telemetry[i], sr);
+            auto levels = engine.telemetry[i].takeLevels();
+            // GUI peak falloff: hold transients briefly, then decay about 18 dB/s.
+            levels.inputPeak = std::max(levels.inputPeak, displayLevels[i].inputPeak - 1.5f);
+            levels.outputPeak = std::max(levels.outputPeak, displayLevels[i].outputPeak - 1.5f);
+            displayLevels[i] = levels;
+            const auto& rta = spectrumAnalyzers[i].getBins();
+            if (ch == 0) strips.left.setTelemetry(levels, rta);
+            else strips.right.setTelemetry(levels, rta);
+            {
+                std::lock_guard<std::mutex> guard(liveMutex);
+                publishedLevels[i] = levels;
+                publishedRta[i] = rta;
+            }
+        }
         syncStrips();
     }
     void setName(int ch, juce::String n)
@@ -1133,6 +1162,37 @@ private:
         root->setProperty("channels", juce::var(channels));
         return juce::var(root.release());
     }
+
+    // Live data is intentionally excluded from preset JSON. Served separately
+    // so a phone can poll meters/RTA at 5-8 Hz without rebuilding all controls.
+    juce::String getTelemetryJson() const
+    {
+        std::array<dualdsp::LiveLevels, 2> levels;
+        std::array<std::array<float, dualdsp::kRtaBins>, 2> spectra;
+        {
+            std::lock_guard<std::mutex> guard(liveMutex);
+            levels = publishedLevels;
+            spectra = publishedRta;
+        }
+        juce::Array<juce::var> channels;
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            const auto i = static_cast<std::size_t>(ch);
+            auto obj = std::make_unique<juce::DynamicObject>();
+            obj->setProperty("inputPeak", levels[i].inputPeak);
+            obj->setProperty("inputRms", levels[i].inputRms);
+            obj->setProperty("outputPeak", levels[i].outputPeak);
+            obj->setProperty("outputRms", levels[i].outputRms);
+            juce::Array<juce::var> spectrum;
+            for (const auto value : spectra[i]) spectrum.add(value);
+            obj->setProperty("rta", juce::var(spectrum));
+            channels.add(juce::var(obj.release()));
+        }
+        auto obj = std::make_unique<juce::DynamicObject>();
+        obj->setProperty("channels", juce::var(channels));
+        return juce::JSON::toString(juce::var(obj.release()));
+    }
+
     juce::String getStateJson() const { return juce::JSON::toString(snapshot()); }
 
     bool applySnapshot(const juce::var& state)
@@ -1235,7 +1295,7 @@ class SimpleDSPApp final : public juce::JUCEApplication
 {
 public:
     const juce::String getApplicationName() override { return "Simple DSP"; }
-    const juce::String getApplicationVersion() override { return "0.3.0"; }
+    const juce::String getApplicationVersion() override { return "0.4.0"; }
     bool moreThanOneInstanceAllowed() override { return false; }
 
     void initialise(const juce::String&) override
