@@ -7,10 +7,10 @@
 int main()
 {
     constexpr double rate = 48000.0;
-    dualdsp::AudioTelemetry telemetry;
+    static dualdsp::AudioTelemetry telemetry;
     telemetry.prepare(rate);
-    dualdsp::SpectrumAnalyzer analyzer;
-    dualdsp::SpectrumAnalyzer inputAnalyzer;
+    static dualdsp::SpectrumAnalyzer analyzer;
+    static dualdsp::SpectrumAnalyzer inputAnalyzer;
     std::vector<float> in(512), out(512);
     for (int block = 0; block < 30; ++block)
     {
@@ -70,9 +70,9 @@ int main()
     // With a 16k FFT at 48kHz, a 32Hz tone has ~3Hz native resolution
     // rather than the old ~12Hz, providing better bass trace detail.
     static_assert(dualdsp::kRtaFftSize >= 16384, "FFT must resolve low bass");
-    dualdsp::AudioTelemetry lowBass;
+    static dualdsp::AudioTelemetry lowBass;
     lowBass.prepare(rate);
-    dualdsp::SpectrumAnalyzer bassAnalyzer;
+    static dualdsp::SpectrumAnalyzer bassAnalyzer;
     std::vector<float> bass(512);
     for (int block = 0; block < 48; ++block)
     {
