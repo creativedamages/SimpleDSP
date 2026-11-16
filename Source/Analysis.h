@@ -37,6 +37,7 @@ class AudioTelemetry
 public:
     AudioTelemetry()
     {
+        for (auto& v : inputRing) v.store(0.0f, std::memory_order_relaxed);
         for (auto& v : outputRing) v.store(0.0f, std::memory_order_relaxed);
     }
     void prepare(double newSampleRate) noexcept
@@ -64,6 +65,8 @@ public:
             peaks[1] = std::max(peaks[1], std::abs(b));
             square[0] += static_cast<double>(a) * a;
             square[1] += static_cast<double>(b) * b;
+            inputRing[static_cast<std::size_t>(writePosition % kRtaRingSize)]
+                .store(a, std::memory_order_relaxed);
             outputRing[static_cast<std::size_t>(writePosition % kRtaRingSize)]
                 .store(b, std::memory_order_relaxed);
             ++writePosition;
@@ -90,12 +93,12 @@ public:
         v.outputRms = amplitudeToDb(std::sqrt(std::max(0.0f, rmsPower[1].load(std::memory_order_acquire))));
         return v;
     }
-    bool copyLatest(std::array<float, kRtaFftSize>& dest) const noexcept
+    bool copyLatest(std::array<float, kRtaFftSize>& dest, bool inputSignal = false) const noexcept
     {
         const auto end = publishedPosition.load(std::memory_order_acquire);
         if (end < kRtaFftSize) return false;
         for (int i = 0; i < kRtaFftSize; ++i)
-            dest[static_cast<std::size_t>(i)] = outputRing[
+            dest[static_cast<std::size_t>(i)] = (inputSignal ? inputRing : outputRing)[
                 static_cast<std::size_t>((end - kRtaFftSize + static_cast<std::uint64_t>(i)) % kRtaRingSize)]
                 .load(std::memory_order_relaxed);
         return true;
@@ -103,6 +106,7 @@ public:
 private:
     double sampleRate = 48000.0;
     // Only one writer; stored atomically so the reader never touches non-atomic samples.
+    std::array<std::atomic<float>, kRtaRingSize> inputRing {};
     std::array<std::atomic<float>, kRtaRingSize> outputRing {};
     std::atomic<std::uint64_t> publishedPosition { 0 };
     std::uint64_t writePosition = 0;
@@ -115,10 +119,10 @@ class SpectrumAnalyzer
 {
 public:
     SpectrumAnalyzer() { bins.fill(static_cast<float>(kMeterFloorDb)); }
-    void update(const AudioTelemetry& telemetry, double sampleRate)
+    void update(const AudioTelemetry& telemetry, double sampleRate, bool inputSignal = false)
     {
         std::array<float, kRtaFftSize> samples {};
-        if (!telemetry.copyLatest(samples))
+        if (!telemetry.copyLatest(samples, inputSignal))
         {
             for (auto& d : bins) d = std::max(static_cast<float>(kMeterFloorDb), d - 5.0f);
             return;
