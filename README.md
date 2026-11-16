@@ -1,4 +1,4 @@
-# Simple DSP — Windows application v0.5.2
+# Simple DSP — Windows application v0.5.3
 
 **Simple DSP** is a locally running JUCE-based Windows audio processor with two separate mono processing paths today. The branding does not specify a channel count because more channels may be added in a future update.
 
@@ -45,6 +45,12 @@
 - Force **UTF-8 source and execution encoding** for the MSVC Windows GUI build (`/utf-8`). This prevents characters such as the collapse/expand arrows, list separators, degree sign and ellipsis from appearing as garbled symbols in the native app and embedded web page.
 - Added a compile-time check to reject a future Windows build if the expected UTF-8 character encoding is missing.
 - The processing engine, device routing, presets, saved data, and spectrum analysis are unchanged.
+
+## v0.5.3 — Readable Windows control labels
+
+- Use plain ASCII labels for native **Save preset...**, **Load preset...**, and **Startup file...** buttons to avoid broken ellipsis glyphs on some Windows/JUCE combinations.
+- Filter and EQ disclosure buttons now say **Show** / **Hide** instead of relying on glyph arrows or centered separators. This is a visual-label change only.
+- The UTF-8 compiler option from v0.5.2 remains enabled; processing, remote layout, and presets are unchanged.
 
 ## Current channel processing
 
