@@ -1,4 +1,4 @@
-# Simple DSP — Windows application v0.4
+# Simple DSP — Windows application v0.5
 
 **Simple DSP** is a locally running JUCE-based Windows audio processor with two separate mono processing paths today. The branding does not specify a channel count because more channels may be added in a future update.
 
@@ -19,10 +19,20 @@
 
 - Independent **input (pre-DSP) and output (post-DSP)** peak/RMS meters for CH 1 and CH 2 on the Windows interface and LAN phone remote. The input meter remains active when the output is unassigned.
 - A **4096-sample FFT RTA** from each channel's processed output, drawn in green beneath the cyan computed EQ response. The RTA has a separate -96 to 0 dBFS scale with 128 log-frequency bins.
-- The Windows GUI updates at approximately 12 frames/sec; the phone polls `/api/telemetry` at about 5 updates/sec. Audio metering uses atomics; FFT and JSON serialization do not execute inside the audio callback.
+- The Windows GUI updates at approximately 12 frames/sec; v0.5 raises phone `/api/telemetry` polling from 5 to 10 updates/sec. Audio metering uses atomics; FFT and JSON serialization do not execute inside the audio callback.
 - No preset-format or routing changes. All existing settings, audio files, channel names, and startup presets remain compatible.
 
 **RTA is digital spectrum level (dBFS), not calibrated acoustic SPL or a transfer function.**
+
+## v0.5 — Dual RTA overlays and collapsible controls
+
+- The EQ plot now overlays independent **pre-DSP input** (muted blue) and **post-DSP output** (green) 4096-sample FFT spectra, drawn beneath the computed cyan EQ response. The input trace is drawn first behind the output trace, and both use the same **-96 to 0 dBFS** scale.
+- The **Filters** and **Parametric EQ** control sections are independently expandable per channel. Both are **collapsed by default** on Windows and the mobile remote. The EQ graph, input/output meters, level, delay, routing and polarity stay visible.
+- The phone requests telemetry **every 100 ms (~10 times per second)** instead of 200 ms (~5 Hz). A request-in-flight guard prevents overlapping telemetry fetches on slow Wi-Fi. Actual display rate depends on network/phone rendering performance; no change to audio block size or processing latency.
+- Reuses existing preset schema and legacy preset storage; collapse states and live spectra are presentation data and are not saved as preset parameters.
+- Audio telemetry writes only atomic samples in the real-time callback. Both FFT analyses execute on the Windows GUI timer.
+
+**The two traces are uncalibrated digital signal spectra, not a phase-coherent transfer function or acoustic measurement.** Input/output comparisons may also reflect delay, levels and any unrelated source variations.
 
 ## Current channel processing
 
@@ -31,7 +41,7 @@
 - Two entirely independent mono paths. **No summing or mixing.** Output assignments must be different.
 - Each path has its own selectable input and output, name, output level (-90 to +18 dB), delay (0–500 ms, 0.01 ms steps), and polarity inversion.
 - Six peaking parametric bands per channel (20 Hz–20 kHz, gain ±18 dB, Q 0.1–15), plus independently enabled 12/24 dB/oct high-pass and low-pass filters.
-- Calculated EQ magnitude curves are plotted on desktop and on the mobile controller. This is **not** an audio spectrum analyzer, real-time measurement or transfer-function tool.
+- Calculated EQ magnitude curves are plotted on desktop and on the mobile controller. The computed EQ curve is separate from the measured digital input/output RTA; neither constitutes an acoustic measurement or a phase-coherent transfer function.
 
 ## Presets: backward compatibility and confirmation
 

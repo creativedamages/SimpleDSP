@@ -269,9 +269,11 @@ class ResponseGraph final : public juce::Component
 public:
     explicit ResponseGraph(const dualdsp::ChannelSettings& p) : params(p) {}
     void setSampleRate(double sr) { sampleRate = sr; }
-    void setSpectrum(const std::array<float, dualdsp::kRtaBins>& values)
+    void setSpectrum(const std::array<float, dualdsp::kRtaBins>& input,
+                     const std::array<float, dualdsp::kRtaBins>& output)
     {
-        rta = values;
+        inputRta = input;
+        outputRta = output;
         repaint();
     }
     void paint(juce::Graphics& g) override
@@ -315,23 +317,36 @@ public:
             return chart.getY() + chart.getHeight() * (0.0f -
                 juce::jlimit(-96.0f, 0.0f, level)) / 96.0f;
         };
-        juce::Path rtaPath;
-        for (int i = 0; i < dualdsp::kRtaBins; ++i)
+        // Draw the measured input first, behind the post-DSP output trace.
+        // Both use the same right-side dBFS scale, independent of EQ gain.
+        const auto drawRta = [&](const std::array<float, dualdsp::kRtaBins>& bins,
+                                 juce::Colour colour, float fillAlpha, float lineAlpha, float width)
         {
-            const auto hz = 20.0 * std::pow(1000.0,
-                static_cast<double>(i) / (dualdsp::kRtaBins - 1));
-            const auto x = fx(hz);
-            if (i == 0) rtaPath.startNewSubPath(x, rtaY(rta[static_cast<std::size_t>(i)]));
-            else rtaPath.lineTo(x, rtaY(rta[static_cast<std::size_t>(i)]));
-        }
-        auto fill = rtaPath;
-        fill.lineTo(chart.getRight(), chart.getBottom());
-        fill.lineTo(chart.getX(), chart.getBottom());
-        fill.closeSubPath();
-        g.setColour(juce::Colour(0xff4ecf9d).withAlpha(0.13f));
-        g.fillPath(fill);
-        g.setColour(juce::Colour(0xff4ecf9d).withAlpha(0.75f));
-        g.strokePath(rtaPath, juce::PathStrokeType(1.3f));
+            juce::Path trace;
+            for (int index = 0; index < dualdsp::kRtaBins; ++index)
+            {
+                const auto hz = 20.0 * std::pow(1000.0,
+                    static_cast<double>(index) / (dualdsp::kRtaBins - 1));
+                const auto x = fx(hz);
+                if (index == 0) trace.startNewSubPath(x, rtaY(bins[static_cast<std::size_t>(index)]));
+                else trace.lineTo(x, rtaY(bins[static_cast<std::size_t>(index)]));
+            }
+            auto area = trace;
+            area.lineTo(chart.getRight(), chart.getBottom());
+            area.lineTo(chart.getX(), chart.getBottom());
+            area.closeSubPath();
+            g.setColour(colour.withAlpha(fillAlpha));
+            g.fillPath(area);
+            g.setColour(colour.withAlpha(lineAlpha));
+            g.strokePath(trace, juce::PathStrokeType(width));
+        };
+        drawRta(inputRta, juce::Colour(0xff8fa5d9), 0.07f, 0.70f, 1.2f);
+        drawRta(outputRta, juce::Colour(0xff4ecf9d), 0.13f, 0.90f, 1.5f);
+        g.setColour(juce::Colour(0xffc0d2e4));
+        g.setFont(10.0f);
+        g.drawText("IN: blue   OUT: green", static_cast<int>(chart.getX()) + 6,
+                   static_cast<int>(chart.getY()) + 2, 190, 15, juce::Justification::left);
+
         g.setColour(juce::Colour(0xff70d6aa));
         g.setFont(10.0f);
         g.drawText("0", static_cast<int>(chart.getRight()) + 3,
@@ -360,12 +375,14 @@ public:
 private:
     const dualdsp::ChannelSettings& params;
     double sampleRate = 48000;
-    std::array<float, dualdsp::kRtaBins> rta = []
+    static std::array<float, dualdsp::kRtaBins> emptySpectrum()
     {
         std::array<float, dualdsp::kRtaBins> initial {};
         initial.fill(-96.0f);
         return initial;
-    }();
+    }
+    std::array<float, dualdsp::kRtaBins> inputRta = emptySpectrum();
+    std::array<float, dualdsp::kRtaBins> outputRta = emptySpectrum();
 };
 
 class ChannelStrip final : public juce::Component
@@ -388,9 +405,12 @@ public:
         addAndMakeVisible(meters);
         addAndMakeVisible(hp);
         addAndMakeVisible(lp);
-        filtersCaption.setText("HIGH-PASS / LOW-PASS", juce::dontSendNotification);
-        filtersCaption.setColour(juce::Label::textColourId, accentColour);
-        addAndMakeVisible(filtersCaption);
+        filtersToggle.onClick = [this]
+        {
+            filtersExpanded = !filtersExpanded;
+            updateExpandedSections();
+        };
+        addAndMakeVisible(filtersToggle);
 
         inputCaption.setText("INPUT ROUTE", juce::dontSendNotification);
         outputCaption.setText("OUTPUT ROUTE", juce::dontSendNotification);
@@ -424,9 +444,12 @@ public:
         polarity.onClick = [this] { params.invertPolarity.store(polarity.getToggleState()); };
         addAndMakeVisible(polarity);
 
-        eqCaption.setText("PARAMETRIC EQ  /  6 BANDS", juce::dontSendNotification);
-        eqCaption.setColour(juce::Label::textColourId, accentColour);
-        addAndMakeVisible(eqCaption);
+        eqToggle.onClick = [this]
+        {
+            eqExpanded = !eqExpanded;
+            updateExpandedSections();
+        };
+        addAndMakeVisible(eqToggle);
         headingLabels.setText("FREQUENCY                         GAIN                         Q", juce::dontSendNotification);
         headingLabels.setColour(juce::Label::textColourId, mutedColour);
         addAndMakeVisible(headingLabels);
@@ -436,10 +459,18 @@ public:
             eqRows[static_cast<std::size_t>(i)] = std::make_unique<EqRow>(i, params.eq[static_cast<std::size_t>(i)]);
             addAndMakeVisible(*eqRows[static_cast<std::size_t>(i)]);
         }
+        updateExpandedSections(); // Default: filters and EQ settings hidden.
     }
 
     std::function<void(int, bool)> onRouteChange;
     std::function<void(int, juce::String)> onNameChange;
+    std::function<void()> onLayoutChanged;
+
+    int preferredHeight() const noexcept
+    {
+        const int eqY = filtersExpanded ? 783 : 634;
+        return eqY + (eqExpanded ? 451 : 49);
+    }
 
     void sync(const juce::String& newName)
     {
@@ -453,10 +484,11 @@ public:
     }
     void setGraphSampleRate(double sr) { graph.setSampleRate(sr); }
     void setTelemetry(const dualdsp::LiveLevels& levels,
-                      const std::array<float, dualdsp::kRtaBins>& spectrum)
+                      const std::array<float, dualdsp::kRtaBins>& inputSpectrum,
+                      const std::array<float, dualdsp::kRtaBins>& outputSpectrum)
     {
         meters.setLevels(levels);
-        graph.setSpectrum(spectrum);
+        graph.setSpectrum(inputSpectrum, outputSpectrum);
     }
 
     void setRouteOptions(const juce::StringArray& availableInputs,
@@ -505,19 +537,35 @@ public:
         delay.setBounds(131, 268, w - 153, 36);
         polarity.setBounds(24, 314, w - 48, 30);
         graph.setBounds(20, 355, w - 40, 225);
-        filtersCaption.setBounds(22, 591, w - 44, 27);
-        hp.setBounds(18, 621, w - 36, 70);
-        lp.setBounds(18, 699, w - 36, 70);
-        eqCaption.setBounds(22, 780, w - 44, 28);
-        headingLabels.setBounds(70, 809, w - 85, 22);
+        filtersToggle.setBounds(22, 591, w - 44, 31);
+        hp.setBounds(18, 627, w - 36, 70);
+        lp.setBounds(18, 703, w - 36, 70);
+        const int eqY = filtersExpanded ? 783 : 634;
+        eqToggle.setBounds(22, eqY, w - 44, 31);
+        headingLabels.setBounds(70, eqY + 29, w - 85, 22);
         for (int i = 0; i < dualdsp::kBands; ++i)
-            eqRows[static_cast<std::size_t>(i)]->setBounds(18, 835 + i * 65, w - 36, 59);
+            eqRows[static_cast<std::size_t>(i)]->setBounds(18, eqY + 54 + i * 65, w - 36, 59);
     }
 
 private:
+    void updateExpandedSections()
+    {
+        hp.setVisible(filtersExpanded);
+        lp.setVisible(filtersExpanded);
+        headingLabels.setVisible(eqExpanded);
+        for (auto& row : eqRows) if (row) row->setVisible(eqExpanded);
+        filtersToggle.setButtonText(filtersExpanded ? "▼ Filters · High-pass / Low-pass" :
+                                                       "▶ Filters · High-pass / Low-pass");
+        eqToggle.setButtonText(eqExpanded ? "▼ Parametric EQ · 6 bands" :
+                                           "▶ Parametric EQ · 6 bands");
+        resized();
+        if (onLayoutChanged) onLayoutChanged();
+    }
+    bool filtersExpanded = false, eqExpanded = false;
     int channelNumber;
     dualdsp::ChannelSettings& params;
-    juce::Label heading, inputCaption, outputCaption, levelCaption, delayCaption, eqCaption, headingLabels, filtersCaption;
+    juce::Label heading, inputCaption, outputCaption, levelCaption, delayCaption, headingLabels;
+    juce::TextButton filtersToggle, eqToggle;
     juce::TextEditor name;
     ResponseGraph graph { params };
     MeterPair meters;
@@ -537,13 +585,20 @@ public:
     {
         addAndMakeVisible(left);
         addAndMakeVisible(right);
-        setSize(1150, 1285);
+        left.onLayoutChanged = [this] { refreshHeight(); };
+        right.onLayoutChanged = [this] { refreshHeight(); };
+        refreshHeight();
+    }
+
+    void refreshHeight()
+    {
+        setSize(1150, std::max(left.preferredHeight(), right.preferredHeight()));
     }
 
     void resized() override
     {
-        left.setBounds(0, 0, 565, 1280);
-        right.setBounds(585, 0, 565, 1280);
+        left.setBounds(0, 0, 565, getHeight());
+        right.setBounds(585, 0, 565, getHeight());
     }
 
     ChannelStrip left, right;
@@ -557,6 +612,7 @@ public:
           strips(engine.parameters[0], engine.parameters[1])
     {
         for (auto& spectrum : publishedRta) spectrum.fill(-96.0f);
+        for (auto& spectrum : publishedInputRta) spectrum.fill(-96.0f);
         appFolder().createDirectory();
         presetFolder().createDirectory();
         readPreferences();
@@ -750,11 +806,13 @@ public:
 private:
     juce::AudioDeviceManager deviceManager;
     AudioEngine engine;
-    std::array<dualdsp::SpectrumAnalyzer, 2> spectrumAnalyzers;
+    std::array<dualdsp::SpectrumAnalyzer, 2> inputSpectrumAnalyzers;
+    std::array<dualdsp::SpectrumAnalyzer, 2> outputSpectrumAnalyzers;
     std::array<dualdsp::LiveLevels, 2> displayLevels;
     mutable std::mutex liveMutex;
     std::array<dualdsp::LiveLevels, 2> publishedLevels;
     std::array<std::array<float, dualdsp::kRtaBins>, 2> publishedRta {};
+    std::array<std::array<float, dualdsp::kRtaBins>, 2> publishedInputRta {};
     juce::AudioDeviceSelectorComponent selector;
     juce::Viewport deviceViewport, contentViewport;
     StripArea strips;
@@ -967,19 +1025,22 @@ private:
         for (int ch = 0; ch < 2; ++ch)
         {
             const auto i = static_cast<std::size_t>(ch);
-            spectrumAnalyzers[i].update(engine.telemetry[i], sr);
+            inputSpectrumAnalyzers[i].update(engine.telemetry[i], sr, true);
+            outputSpectrumAnalyzers[i].update(engine.telemetry[i], sr, false);
             auto levels = engine.telemetry[i].takeLevels();
             // GUI peak falloff: hold transients briefly, then decay about 18 dB/s.
             levels.inputPeak = std::max(levels.inputPeak, displayLevels[i].inputPeak - 1.5f);
             levels.outputPeak = std::max(levels.outputPeak, displayLevels[i].outputPeak - 1.5f);
             displayLevels[i] = levels;
-            const auto& rta = spectrumAnalyzers[i].getBins();
-            if (ch == 0) strips.left.setTelemetry(levels, rta);
-            else strips.right.setTelemetry(levels, rta);
+            const auto& inputRta = inputSpectrumAnalyzers[i].getBins();
+            const auto& outputRta = outputSpectrumAnalyzers[i].getBins();
+            if (ch == 0) strips.left.setTelemetry(levels, inputRta, outputRta);
+            else strips.right.setTelemetry(levels, inputRta, outputRta);
             {
                 std::lock_guard<std::mutex> guard(liveMutex);
                 publishedLevels[i] = levels;
-                publishedRta[i] = rta;
+                publishedInputRta[i] = inputRta;
+                publishedRta[i] = outputRta;
             }
         }
         syncStrips();
@@ -1164,15 +1225,17 @@ private:
     }
 
     // Live data is intentionally excluded from preset JSON. Served separately
-    // so a phone can poll meters/RTA at 5-8 Hz without rebuilding all controls.
+    // so a phone can poll meters and both RTAs at up to 10 Hz without rebuilding controls.
     juce::String getTelemetryJson() const
     {
         std::array<dualdsp::LiveLevels, 2> levels;
         std::array<std::array<float, dualdsp::kRtaBins>, 2> spectra;
+        std::array<std::array<float, dualdsp::kRtaBins>, 2> inputSpectra;
         {
             std::lock_guard<std::mutex> guard(liveMutex);
             levels = publishedLevels;
             spectra = publishedRta;
+            inputSpectra = publishedInputRta;
         }
         juce::Array<juce::var> channels;
         for (int ch = 0; ch < 2; ++ch)
@@ -1186,6 +1249,9 @@ private:
             juce::Array<juce::var> spectrum;
             for (const auto value : spectra[i]) spectrum.add(value);
             obj->setProperty("rta", juce::var(spectrum));
+            juce::Array<juce::var> inputSpectrum;
+            for (const auto value : inputSpectra[i]) inputSpectrum.add(value);
+            obj->setProperty("inputRta", juce::var(inputSpectrum));
             channels.add(juce::var(obj.release()));
         }
         auto obj = std::make_unique<juce::DynamicObject>();

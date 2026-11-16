@@ -10,6 +10,7 @@ int main()
     dualdsp::AudioTelemetry telemetry;
     telemetry.prepare(rate);
     dualdsp::SpectrumAnalyzer analyzer;
+    dualdsp::SpectrumAnalyzer inputAnalyzer;
     std::vector<float> in(512), out(512);
     for (int block = 0; block < 30; ++block)
     {
@@ -24,7 +25,11 @@ int main()
     assert(levels.inputPeak > -3.3f && levels.inputPeak < -2.7f);
     assert(levels.outputPeak > -9.4f && levels.outputPeak < -8.7f);
     assert(levels.outputRms < levels.inputRms - 5.8f);
-    for (int i = 0; i < 8; ++i) analyzer.update(telemetry, rate);
+    for (int i = 0; i < 8; ++i)
+    {
+        analyzer.update(telemetry, rate);
+        inputAnalyzer.update(telemetry, rate, true);
+    }
     const auto spectrum = analyzer.getBins();
     auto maxBin = 0;
     for (int i = 1; i < dualdsp::kRtaBins; ++i)
@@ -33,6 +38,11 @@ int main()
                                            static_cast<double>(maxBin) / (dualdsp::kRtaBins-1));
     assert(dominantHz > 850 && dominantHz < 1200);
     assert(spectrum[maxBin] > -13.0f);
+    const auto inputSpectrum = inputAnalyzer.getBins();
+    // The pre-DSP sine is twice the post-DSP sine (approximately +6.02 dB).
+    assert(inputSpectrum[maxBin] > spectrum[maxBin] + 5.0f);
+    assert(inputSpectrum[maxBin] < spectrum[maxBin] + 7.0f);
+    assert(inputSpectrum[0] < -45.0f);
     assert(spectrum[0] < -45.0f);
     // No signal must produce floor values, not undefined FFT magnitudes.
     telemetry.recordBlock(nullptr, nullptr, 512);
