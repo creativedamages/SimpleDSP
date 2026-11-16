@@ -193,10 +193,15 @@ public:
             const double halfBandwidth = std::max(frequencyPerBin, hz * 0.030);
             const int start = std::clamp(static_cast<int>(std::ceil((hz - halfBandwidth) / frequencyPerBin)), 1, kRtaFftSize/2-1);
             const int stop = std::clamp(static_cast<int>(std::floor((hz + halfBandwidth) / frequencyPerBin)), start, kRtaFftSize/2-1);
-            double maxAmp = interpolated;
+            double localPeak = interpolated;
             for (int k = start; k <= stop; ++k)
-                maxAmp = std::max(maxAmp, std::abs(spectrum[static_cast<std::size_t>(k)]));
-            const float level = amplitudeToDb(static_cast<float>(maxAmp * (4.0 / (kRtaFftSize - 1))));
+                localPeak = std::max(localPeak, std::abs(spectrum[static_cast<std::size_t>(k)]));
+            // Fractional-bin interpolation dominates in the bass, avoiding
+            // repeated-bin flat steps. Blend back to peak buckets above 80Hz
+            // for useful narrow-band detection at mid/high frequencies.
+            const double peakBlend = std::clamp((hz - 80.0) / 90.0, 0.0, 1.0);
+            const double measured = interpolated + peakBlend * (localPeak - interpolated);
+            const float level = amplitudeToDb(static_cast<float>(measured * (4.0 / (kRtaFftSize - 1))));
             auto& smoothed = bins[static_cast<std::size_t>(index)];
             smoothed += (level > smoothed ? 0.70f : 0.20f) * (level - smoothed);
         }
