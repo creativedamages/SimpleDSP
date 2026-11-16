@@ -20,7 +20,8 @@ static constexpr const char* kRemotePage = R"DSP_HTML(<!doctype html>
 <div id="app" style="display:none"><div class="bar"><input id="presetname" type="text" placeholder="Preset name" maxlength="60"><button onclick="savePreset()">Save preset</button><select id="presets" aria-label="Saved presets"><option>Saved presets</option></select><button onclick="loadPreset()">Load preset</button><button class="primary" onclick="setStartupPreset()">Set as load-at-launch</button></div><div id="startupStatus" class="startup-status" role="status">Startup preset: not configured</div>
 <div class="tabs"><button id="tab0" onclick="showTab(0)">CH 1</button><button id="tab1" onclick="showTab(1)">CH 2</button></div><main class="channels" id="channels"></main></div><div class="toast" id="toast"></div>
 <script>
-let pin=localStorage.getItem('dspPin')||'',model=null,telemetry=null,selectedTab=0,busy=false,editingUntil=0;
+)DSP_HTML"
+R"DSP_HTML(let pin=localStorage.getItem('dspPin')||'',model=null,telemetry=null,selectedTab=0,busy=false,editingUntil=0;
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));
 function notice(s){$('toast').textContent=s;$('toast').style.display='block';setTimeout(()=>$('toast').style.display='none',2800)}
 async function api(path,method='GET',data){const r=await fetch(path,{method,headers:{'X-DSP-PIN':pin,'Content-Type':'application/json'},body:data?JSON.stringify(data):undefined,cache:'no-store'});if(r.status===401){$('app').style.display='none';$('pin').style.display='block';throw Error('Enter PIN from the Windows application')}if(!r.ok)throw Error((await r.text()).slice(0,120));return r.json()}
