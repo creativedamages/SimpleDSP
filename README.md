@@ -1,4 +1,4 @@
-# Simple DSP — Windows application v0.3
+# Simple DSP — Windows application v0.4
 
 **Simple DSP** is a locally running JUCE-based Windows audio processor with two separate mono processing paths today. The branding does not specify a channel count because more channels may be added in a future update.
 
@@ -14,6 +14,15 @@
 - Simplified the mobile page: no bottom explanatory text.
 - Added **Set as load-at-launch** on the phone for a preset selected from the saved-presets list. The HTTP API waits for the Windows app to write and re-read its preference file before responding successfully. Both interfaces display the selected startup preset; the Windows footer also confirms the selection.
 - Retained the legacy settings/presets folder and existing startup-file selection rather than erasing or moving them. Existing Windows startup registry settings migrate to the SimpleDSP Run entry.
+
+## v0.4 — Live meters and spectrum analyzer
+
+- Independent **input (pre-DSP) and output (post-DSP)** peak/RMS meters for CH 1 and CH 2 on the Windows interface and LAN phone remote. The input meter remains active when the output is unassigned.
+- A **4096-sample FFT RTA** from each channel's processed output, drawn in green beneath the cyan computed EQ response. The RTA has a separate -96 to 0 dBFS scale with 128 log-frequency bins.
+- The Windows GUI updates at approximately 12 frames/sec; the phone polls `/api/telemetry` at about 5 updates/sec. Audio metering uses atomics; FFT and JSON serialization do not execute inside the audio callback.
+- No preset-format or routing changes. All existing settings, audio files, channel names, and startup presets remain compatible.
+
+**RTA is digital spectrum level (dBFS), not calibrated acoustic SPL or a transfer function.**
 
 ## Current channel processing
 
@@ -66,6 +75,7 @@ The dependency-free DSP tests can be run with `g++ -std=c++17 -O2 tests/dsp_test
 
 ## Project contents
 
+- `Source/Analysis.h`: real-time-safe input/output metering and 4096-point spectrum analyzer
 - `Source/DSP.h`: per-channel real-time processing and calculated EQ magnitude response
 - `Source/Main.cpp`: Windows GUI, routes, presets, autostart, and phone-state sync
 - `Source/RemoteServer.h`: local-only HTTP listener, optional PIN, and preset endpoints

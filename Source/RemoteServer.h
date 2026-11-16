@@ -16,6 +16,7 @@ class RemoteServer final
 {
 public:
     using Snapshot = std::function<juce::String()>;
+    using Telemetry = std::function<juce::String()>;
     using Change = std::function<void(const juce::var&)>;
     // Called by the server worker, returns true only AFTER the GUI persisted
     // and acknowledged the selected startup preset.
@@ -23,10 +24,11 @@ public:
 
     bool start(const juce::String& address, int port, const juce::String& sixDigitPin,
                bool pinRequired, juce::File presetDirectory, Snapshot getState,
-               Change applyState, SelectStartup selectStartupPreset)
+               Telemetry getTelemetry, Change applyState, SelectStartup selectStartupPreset)
     {
         stop();
         state = std::move(getState);
+        telemetry = std::move(getTelemetry);
         change = std::move(applyState);
         selectStartup = std::move(selectStartupPreset);
         requiresPin.store(pinRequired);
@@ -210,6 +212,10 @@ private:
         {
             send(client, 200, utf8(state()), "application/json"); return;
         }
+        if (method == "GET" && path == "/api/telemetry")
+        {
+            send(client, 200, utf8(telemetry()), "application/json"); return;
+        }
         if (method == "GET" && path == "/api/presets")
         {
             auto o = std::make_unique<juce::DynamicObject>();
@@ -263,6 +269,7 @@ private:
     std::thread worker;
     std::atomic<bool> active { false };
     Snapshot state;
+    Telemetry telemetry;
     Change change;
     SelectStartup selectStartup;
     juce::File presets;

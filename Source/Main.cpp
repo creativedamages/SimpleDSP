@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "DSP.h"
+#include "Analysis.h"
 #include "RemoteServer.h"
 #include <array>
 #include <functional>
@@ -35,11 +36,13 @@ class AudioEngine final : public juce::AudioIODeviceCallback
 {
 public:
     std::array<dualdsp::ChannelSettings, 2> parameters;
+    std::array<dualdsp::AudioTelemetry, 2> telemetry;
 
     void audioDeviceAboutToStart(juce::AudioIODevice* device) override
     {
         const auto sampleRate = device != nullptr ? device->getCurrentSampleRate() : 48000.0;
         for (auto& processor : processors) processor.prepare(sampleRate);
+        for (auto& meter : telemetry) meter.prepare(sampleRate);
 
         // JUCE's callback arrays are packed in active-channel order, even when
         // a user selects physical channels such as input 5 and output 8.
@@ -61,7 +64,11 @@ public:
         }
     }
 
-    void audioDeviceStopped() override {}
+    void audioDeviceStopped() override
+    {
+        // Clear stale meters/spectrum when the audio interface disconnects.
+        for (auto& meter : telemetry) meter.prepare(48000.0);
+    }
 
     void audioDeviceIOCallbackWithContext(const float* const* inputData,
                                           int inputCount,
@@ -84,16 +91,22 @@ public:
             const int inputRoute = callbackInputs[static_cast<std::size_t>(path)].load(std::memory_order_acquire);
             const int outputRoute = callbackOutputs[static_cast<std::size_t>(path)].load(std::memory_order_acquire);
 
-            // Packed active callback channels, not the user-visible physical IDs.
-            if (inputRoute < 0 || inputRoute >= inputCount || outputRoute < 0
-                || outputRoute >= outputCount || inputData[inputRoute] == nullptr
-                || outputData[outputRoute] == nullptr)
+            // Input metering must remain active even if the output route is unassigned.
+            const float* source = inputRoute >= 0 && inputRoute < inputCount
+                ? inputData[inputRoute] : nullptr;
+            float* destination = outputRoute >= 0 && outputRoute < outputCount
+                ? outputData[outputRoute] : nullptr;
+            if (source == nullptr || destination == nullptr)
+            {
+                telemetry[static_cast<std::size_t>(path)].recordBlock(source, nullptr, numSamples);
                 continue;
+            }
 
             auto& processor = processors[static_cast<std::size_t>(path)];
             processor.beginBlock(params);
             for (int sample = 0; sample < numSamples; ++sample)
-                outputData[outputRoute][sample] = processor.process(inputData[inputRoute][sample]);
+                destination[sample] = processor.process(source[sample]);
+            telemetry[static_cast<std::size_t>(path)].recordBlock(source, destination, numSamples);
         }
     }
 
@@ -208,17 +221,65 @@ private:
     juce::ComboBox slope;
 };
 
+
+class MeterPair final : public juce::Component
+{
+public:
+    void setLevels(const dualdsp::LiveLevels& levels)
+    {
+        values = levels;
+        repaint();
+    }
+    void paint(juce::Graphics& g) override
+    {
+        g.setColour(juce::Colour(0xff101923));
+        g.fillRoundedRectangle(getLocalBounds().toFloat(), 7);
+        g.setFont(11.0f);
+        g.setColour(mutedColour);
+        g.drawText("SIGNAL (dBFS)", 10, 2, 130, 14, juce::Justification::centredLeft);
+        drawMeter(g, 19, "IN", values.inputPeak, values.inputRms, juce::Colour(0xff65cad8));
+        drawMeter(g, 38, "OUT", values.outputPeak, values.outputRms, juce::Colour(0xff71daa6));
+    }
+private:
+    void drawMeter(juce::Graphics& g, int y, const juce::String& label,
+                   float peak, float rms, juce::Colour colour)
+    {
+        const float left = 48.0f, width = static_cast<float>(getWidth()) - 123.0f;
+        const auto position = [width](float db)
+        {
+            return width * juce::jlimit(0.0f, 1.0f, (db + 72.0f) / 72.0f);
+        };
+        g.setColour(mutedColour);
+        g.drawText(label, 10, y - 2, 36, 17, juce::Justification::centredLeft);
+        g.setColour(juce::Colour(0xff293745));
+        g.fillRoundedRectangle(left, static_cast<float>(y), width, 12.0f, 3.0f);
+        g.setColour(colour.withAlpha(0.65f));
+        g.fillRoundedRectangle(left, static_cast<float>(y), position(rms), 12.0f, 2.0f);
+        g.setColour(peak >= -0.1f ? juce::Colours::red : colour.brighter(0.45f));
+        g.fillRect(left + position(peak), static_cast<float>(y) - 1.0f, 3.0f, 14.0f);
+        g.setColour(peak >= -0.1f ? juce::Colours::red : juce::Colours::white);
+        g.drawText(juce::String(peak, 1) + " dB", getWidth() - 74, y - 2, 69, 17,
+                   juce::Justification::centredRight);
+    }
+    dualdsp::LiveLevels values;
+};
+
 class ResponseGraph final : public juce::Component
 {
 public:
     explicit ResponseGraph(const dualdsp::ChannelSettings& p) : params(p) {}
-    void setSampleRate(double sr) { sampleRate = sr; repaint(); }
+    void setSampleRate(double sr) { sampleRate = sr; }
+    void setSpectrum(const std::array<float, dualdsp::kRtaBins>& values)
+    {
+        rta = values;
+        repaint();
+    }
     void paint(juce::Graphics& g) override
     {
         auto rect = getLocalBounds().toFloat();
         g.setColour(juce::Colour(0xff111c28));
         g.fillRoundedRectangle(rect, 8);
-        auto chart = rect.reduced(38.0f, 16.0f);
+        auto chart = rect.reduced(42.0f, 16.0f);
         chart.removeFromBottom(12.0f);
         const auto fx = [&](double hz) { return chart.getX() + chart.getWidth() *
             static_cast<float>(std::log10(hz / 20.0) / 3.0); };
@@ -247,6 +308,40 @@ public:
                     juce::Justification::centred, 1);
             }
         }
+        // Measured post-DSP output spectrum: transparent underlay using the
+        // right-hand -96 to 0 dBFS scale (EQ uses +/-24 dB on the left).
+        const auto rtaY = [&](float level)
+        {
+            return chart.getY() + chart.getHeight() * (0.0f -
+                juce::jlimit(-96.0f, 0.0f, level)) / 96.0f;
+        };
+        juce::Path rtaPath;
+        for (int i = 0; i < dualdsp::kRtaBins; ++i)
+        {
+            const auto hz = 20.0 * std::pow(1000.0,
+                static_cast<double>(i) / (dualdsp::kRtaBins - 1));
+            const auto x = fx(hz);
+            if (i == 0) rtaPath.startNewSubPath(x, rtaY(rta[static_cast<std::size_t>(i)]));
+            else rtaPath.lineTo(x, rtaY(rta[static_cast<std::size_t>(i)]));
+        }
+        auto fill = rtaPath;
+        fill.lineTo(chart.getRight(), chart.getBottom());
+        fill.lineTo(chart.getX(), chart.getBottom());
+        fill.closeSubPath();
+        g.setColour(juce::Colour(0xff4ecf9d).withAlpha(0.13f));
+        g.fillPath(fill);
+        g.setColour(juce::Colour(0xff4ecf9d).withAlpha(0.75f));
+        g.strokePath(rtaPath, juce::PathStrokeType(1.3f));
+        g.setColour(juce::Colour(0xff70d6aa));
+        g.setFont(10.0f);
+        g.drawText("0", static_cast<int>(chart.getRight()) + 3,
+                   static_cast<int>(chart.getY()) - 6, 30, 13, juce::Justification::left);
+        g.drawText("-48", static_cast<int>(chart.getRight()) + 3,
+                   static_cast<int>(chart.getCentreY()) - 6, 35, 13, juce::Justification::left);
+        g.drawText("-96", static_cast<int>(chart.getRight()) + 3,
+                   static_cast<int>(chart.getBottom()) - 6, 35, 13, juce::Justification::left);
+        g.drawText("RTA dBFS", static_cast<int>(chart.getRight()) - 60,
+                   2, 92, 13, juce::Justification::centredRight);
         juce::Path response;
         for (int i = 0; i <= 220; ++i)
         {
@@ -265,6 +360,12 @@ public:
 private:
     const dualdsp::ChannelSettings& params;
     double sampleRate = 48000;
+    std::array<float, dualdsp::kRtaBins> rta = []
+    {
+        std::array<float, dualdsp::kRtaBins> initial {};
+        initial.fill(-96.0f);
+        return initial;
+    }();
 };
 
 class ChannelStrip final : public juce::Component
@@ -284,6 +385,7 @@ public:
         name.onTextChange = [this]{ if (onNameChange) onNameChange(channelNumber - 1, name.getText()); };
         addAndMakeVisible(name);
         addAndMakeVisible(graph);
+        addAndMakeVisible(meters);
         addAndMakeVisible(hp);
         addAndMakeVisible(lp);
         filtersCaption.setText("HIGH-PASS / LOW-PASS", juce::dontSendNotification);
@@ -350,6 +452,12 @@ public:
         graph.repaint();
     }
     void setGraphSampleRate(double sr) { graph.setSampleRate(sr); }
+    void setTelemetry(const dualdsp::LiveLevels& levels,
+                      const std::array<float, dualdsp::kRtaBins>& spectrum)
+    {
+        meters.setLevels(levels);
+        graph.setSpectrum(spectrum);
+    }
 
     void setRouteOptions(const juce::StringArray& availableInputs,
                          const juce::StringArray& availableOutputs,
@@ -390,19 +498,20 @@ public:
         outputCaption.setBounds(34 + half, 95, half, 19);
         input.setBounds(22, 119, half, 31);
         output.setBounds(34 + half, 119, half, 31);
-        levelCaption.setBounds(22, 169, 110, 22);
-        delayCaption.setBounds(22, 214, 110, 22);
-        level.setBounds(131, 163, w - 153, 36);
-        delay.setBounds(131, 209, w - 153, 36);
-        polarity.setBounds(24, 256, w - 48, 30);
-        graph.setBounds(20, 296, w - 40, 205);
-        filtersCaption.setBounds(22, 510, w - 44, 27);
-        hp.setBounds(18, 541, w - 36, 70);
-        lp.setBounds(18, 619, w - 36, 70);
-        eqCaption.setBounds(22, 701, w - 44, 28);
-        headingLabels.setBounds(70, 730, w - 85, 22);
+        meters.setBounds(18, 158, w - 36, 57);
+        levelCaption.setBounds(22, 228, 110, 22);
+        delayCaption.setBounds(22, 273, 110, 22);
+        level.setBounds(131, 222, w - 153, 36);
+        delay.setBounds(131, 268, w - 153, 36);
+        polarity.setBounds(24, 314, w - 48, 30);
+        graph.setBounds(20, 355, w - 40, 225);
+        filtersCaption.setBounds(22, 591, w - 44, 27);
+        hp.setBounds(18, 621, w - 36, 70);
+        lp.setBounds(18, 699, w - 36, 70);
+        eqCaption.setBounds(22, 780, w - 44, 28);
+        headingLabels.setBounds(70, 809, w - 85, 22);
         for (int i = 0; i < dualdsp::kBands; ++i)
-            eqRows[static_cast<std::size_t>(i)]->setBounds(18, 755 + i * 65, w - 36, 59);
+            eqRows[static_cast<std::size_t>(i)]->setBounds(18, 835 + i * 65, w - 36, 59);
     }
 
 private:
@@ -411,6 +520,7 @@ private:
     juce::Label heading, inputCaption, outputCaption, levelCaption, delayCaption, eqCaption, headingLabels, filtersCaption;
     juce::TextEditor name;
     ResponseGraph graph { params };
+    MeterPair meters;
     CutoffRow hp { "High-pass enabled", params.highPass };
     CutoffRow lp { "Low-pass enabled", params.lowPass };
     juce::ComboBox input, output;
@@ -427,13 +537,13 @@ public:
     {
         addAndMakeVisible(left);
         addAndMakeVisible(right);
-        setSize(1150, 1190);
+        setSize(1150, 1285);
     }
 
     void resized() override
     {
-        left.setBounds(0, 0, 565, 1180);
-        right.setBounds(585, 0, 565, 1180);
+        left.setBounds(0, 0, 565, 1280);
+        right.setBounds(585, 0, 565, 1280);
     }
 
     ChannelStrip left, right;
@@ -446,6 +556,7 @@ public:
         : selector(deviceManager, 0, 64, 0, 64, false, false, false, true),
           strips(engine.parameters[0], engine.parameters[1])
     {
+        for (auto& spectrum : publishedRta) spectrum.fill(-96.0f);
         appFolder().createDirectory();
         presetFolder().createDirectory();
         readPreferences();
@@ -563,6 +674,7 @@ public:
             const auto safe = juce::Component::SafePointer<MainComponent>(this);
             const bool started = remote.start(remoteAddress, 8765, remotePin, pinRequired, presetFolder(),
                 [this] { return getStateJson(); },
+                [this] { return getTelemetryJson(); },
                 [safe](const juce::var& command)
                 {
                     juce::MessageManager::callAsync([safe, command]
@@ -595,7 +707,7 @@ public:
         }
         else remoteInfo.setText("Remote unavailable: no private IPv4 interface found", juce::dontSendNotification);
 
-        startTimerHz(5);
+        startTimerHz(12);
         setSize(1560, 925);
     }
 
@@ -638,6 +750,11 @@ public:
 private:
     juce::AudioDeviceManager deviceManager;
     AudioEngine engine;
+    std::array<dualdsp::SpectrumAnalyzer, 2> spectrumAnalyzers;
+    std::array<dualdsp::LiveLevels, 2> displayLevels;
+    mutable std::mutex liveMutex;
+    std::array<dualdsp::LiveLevels, 2> publishedLevels;
+    std::array<std::array<float, dualdsp::kRtaBins>, 2> publishedRta {};
     juce::AudioDeviceSelectorComponent selector;
     juce::Viewport deviceViewport, contentViewport;
     StripArea strips;
@@ -843,6 +960,28 @@ private:
             strips.right.setGraphSampleRate(device->getCurrentSampleRate());
             // Keep the footer informative without overwriting reported errors constantly.
         }
+
+        // Only the GUI timer performs FFT analysis, keeping the audio callback
+        // free of transforms, allocations, socket operations and locks.
+        const auto sr = graphSampleRate.load();
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            const auto i = static_cast<std::size_t>(ch);
+            spectrumAnalyzers[i].update(engine.telemetry[i], sr);
+            auto levels = engine.telemetry[i].takeLevels();
+            // GUI peak falloff: hold transients briefly, then decay about 18 dB/s.
+            levels.inputPeak = std::max(levels.inputPeak, displayLevels[i].inputPeak - 1.5f);
+            levels.outputPeak = std::max(levels.outputPeak, displayLevels[i].outputPeak - 1.5f);
+            displayLevels[i] = levels;
+            const auto& rta = spectrumAnalyzers[i].getBins();
+            if (ch == 0) strips.left.setTelemetry(levels, rta);
+            else strips.right.setTelemetry(levels, rta);
+            {
+                std::lock_guard<std::mutex> guard(liveMutex);
+                publishedLevels[i] = levels;
+                publishedRta[i] = rta;
+            }
+        }
         syncStrips();
     }
     void setName(int ch, juce::String n)
@@ -1023,6 +1162,37 @@ private:
         root->setProperty("channels", juce::var(channels));
         return juce::var(root.release());
     }
+
+    // Live data is intentionally excluded from preset JSON. Served separately
+    // so a phone can poll meters/RTA at 5-8 Hz without rebuilding all controls.
+    juce::String getTelemetryJson() const
+    {
+        std::array<dualdsp::LiveLevels, 2> levels;
+        std::array<std::array<float, dualdsp::kRtaBins>, 2> spectra;
+        {
+            std::lock_guard<std::mutex> guard(liveMutex);
+            levels = publishedLevels;
+            spectra = publishedRta;
+        }
+        juce::Array<juce::var> channels;
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            const auto i = static_cast<std::size_t>(ch);
+            auto obj = std::make_unique<juce::DynamicObject>();
+            obj->setProperty("inputPeak", levels[i].inputPeak);
+            obj->setProperty("inputRms", levels[i].inputRms);
+            obj->setProperty("outputPeak", levels[i].outputPeak);
+            obj->setProperty("outputRms", levels[i].outputRms);
+            juce::Array<juce::var> spectrum;
+            for (const auto value : spectra[i]) spectrum.add(value);
+            obj->setProperty("rta", juce::var(spectrum));
+            channels.add(juce::var(obj.release()));
+        }
+        auto obj = std::make_unique<juce::DynamicObject>();
+        obj->setProperty("channels", juce::var(channels));
+        return juce::JSON::toString(juce::var(obj.release()));
+    }
+
     juce::String getStateJson() const { return juce::JSON::toString(snapshot()); }
 
     bool applySnapshot(const juce::var& state)
@@ -1125,7 +1295,7 @@ class SimpleDSPApp final : public juce::JUCEApplication
 {
 public:
     const juce::String getApplicationName() override { return "Simple DSP"; }
-    const juce::String getApplicationVersion() override { return "0.3.0"; }
+    const juce::String getApplicationVersion() override { return "0.4.0"; }
     bool moreThanOneInstanceAllowed() override { return false; }
 
     void initialise(const juce::String&) override

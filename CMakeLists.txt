@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(SimpleDSP VERSION 0.3.0 LANGUAGES C CXX)
+project(SimpleDSP VERSION 0.4.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -30,7 +30,7 @@ juce_add_binary_data(SimpleDSPResources
     assets/icon-512.png
 )
 
-target_sources(SimpleDSP PRIVATE Source/Main.cpp Source/DSP.h Source/RemoteServer.h Source/RemotePage.h)
+target_sources(SimpleDSP PRIVATE Source/Main.cpp Source/DSP.h Source/Analysis.h Source/RemoteServer.h Source/RemotePage.h)
 target_compile_definitions(SimpleDSP PRIVATE
   JUCE_ASIO=1
   JUCE_WASAPI=1
@@ -52,4 +52,9 @@ include(CTest)
 if(BUILD_TESTING)
   add_executable(dual_dsp_tests tests/dsp_test.cpp)
   add_test(NAME DSP_tests COMMAND dual_dsp_tests)
+endif()
+
+if(BUILD_TESTING)
+  add_executable(dsp_analysis_tests tests/analysis_test.cpp)
+  add_test(NAME DSP_analysis_tests COMMAND dsp_analysis_tests)
 endif()
