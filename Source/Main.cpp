@@ -10,6 +10,11 @@
 #include <utility>
 #include <mutex>
 
+// Catch a future build that forgets the UTF-8 compiler setting. JUCE uses
+// UTF-8 for its narrow string literals in labels, menu items, and buttons.
+static_assert(sizeof("\u2022") == 4 && sizeof("▼") == 4,
+              "Simple DSP requires UTF-8 source and execution charsets (/utf-8 on MSVC).");
+
 namespace
 {
 const auto backgroundColour = juce::Colour(0xff131820);

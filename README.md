@@ -1,4 +1,4 @@
-# Simple DSP — Windows application v0.5.1
+# Simple DSP — Windows application v0.5.2
 
 **Simple DSP** is a locally running JUCE-based Windows audio processor with two separate mono processing paths today. The branding does not specify a channel count because more channels may be added in a future update.
 
@@ -39,6 +39,12 @@
 - **Input (pre-DSP): cyan** on the Windows and phone audio meters and input RTA spectrum.
 - **Output (post-DSP): pink** on the Windows and phone audio meters and output RTA spectrum.
 - **Computed EQ response: gold**, deliberately distinct from both measured traces. The underlying signal analysis and presets are unchanged.
+
+## v0.5.2 — Windows text encoding repair
+
+- Force **UTF-8 source and execution encoding** for the MSVC Windows GUI build (`/utf-8`). This prevents characters such as the collapse/expand arrows, list separators, degree sign and ellipsis from appearing as garbled symbols in the native app and embedded web page.
+- Added a compile-time check to reject a future Windows build if the expected UTF-8 character encoding is missing.
+- The processing engine, device routing, presets, saved data, and spectrum analysis are unchanged.
 
 ## Current channel processing
 
