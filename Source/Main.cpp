@@ -562,10 +562,10 @@ private:
         lp.setVisible(filtersExpanded);
         headingLabels.setVisible(eqExpanded);
         for (auto& row : eqRows) if (row) row->setVisible(eqExpanded);
-        filtersToggle.setButtonText(filtersExpanded ? "▼ Filters · High-pass / Low-pass" :
-                                                       "▶ Filters · High-pass / Low-pass");
-        eqToggle.setButtonText(eqExpanded ? "▼ Parametric EQ · 6 bands" :
-                                           "▶ Parametric EQ · 6 bands");
+        filtersToggle.setButtonText(filtersExpanded ? "Hide filters - High-pass / Low-pass" :
+                                                       "Show filters - High-pass / Low-pass");
+        eqToggle.setButtonText(eqExpanded ? "Hide parametric EQ - 6 bands" :
+                                           "Show parametric EQ - 6 bands");
         resized();
         if (onLayoutChanged) onLayoutChanged();
     }
@@ -637,9 +637,9 @@ public:
         info.setColour(juce::Label::textColourId, mutedColour);
         info.setText("ASIO recommended for low latency. Test first with outputs muted.", juce::dontSendNotification);
 
-        savePreset.setButtonText("Save preset…");
-        loadPreset.setButtonText("Load preset…");
-        chooseStartup.setButtonText("Startup file…");
+        savePreset.setButtonText("Save preset...");
+        loadPreset.setButtonText("Load preset...");
+        chooseStartup.setButtonText("Startup file...");
         loadOnLaunch.setButtonText("Load at launch");
         startWithWindows.setButtonText("Start with Windows");
         pinRequiredToggle.setButtonText("Require remote PIN");
