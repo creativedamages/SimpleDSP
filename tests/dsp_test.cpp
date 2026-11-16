@@ -82,5 +82,24 @@ int main()
     }
     assert(std::sqrt(energy / 23999.0) < 0.01); // far below normal 0.707 sine RMS
     settings.highPass.enabled.store(false);
-    std::cout << "DSP passthrough, polarity, 10ms delay, HP/LP slopes, and PEQ response passed.\n";
+    // Muting must be independent of the level setting, and must fade instead
+    // of switching abruptly (to prevent clicks when used from a phone).
+    ChannelSettings mutedSettings;
+    MonoProcessor muteProcessor;
+    muteProcessor.prepare(48000.0);
+    muteProcessor.beginBlock(mutedSettings);
+    for (int n = 0; n < 400; ++n)
+        assert(std::abs(muteProcessor.process(0.5f) - 0.5f) < 1e-4f);
+    mutedSettings.outputMuted.store(true);
+    muteProcessor.beginBlock(mutedSettings);
+    const float firstMuted = muteProcessor.process(0.5f);
+    assert(firstMuted > 0.0f && firstMuted < 0.5f);
+    for (int n = 0; n < 400; ++n) muteProcessor.process(0.5f);
+    assert(std::abs(muteProcessor.process(0.5f)) < 1e-5f);
+    mutedSettings.outputMuted.store(false);
+    muteProcessor.beginBlock(mutedSettings);
+    for (int n = 0; n < 400; ++n) muteProcessor.process(0.5f);
+    assert(std::abs(muteProcessor.process(0.5f) - 0.5f) < 1e-4f);
+    std::cout << "DSP passthrough, polarity, delay, filters and click-free mute passed.\\n";
+
 }
