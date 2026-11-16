@@ -35,6 +35,7 @@ struct ChannelSettings
     std::atomic<double> levelDb { 0.0 };
     std::atomic<double> delayMs { 0.0 };
     std::atomic<bool> invertPolarity { false };
+    std::atomic<bool> outputMuted { false }; // Separate from level; true means silent output.
     std::array<EqSettings, kBands> eq;
     CutoffSettings highPass, lowPass;
 
@@ -205,6 +206,7 @@ public:
         for (auto& cached : oldValues) cached = { -1.0, -999.0, -1.0 };
         gainRamp.prepare(sampleRate, 0.015, 1.0);
         polarityRamp.prepare(sampleRate, 0.003, 1.0);
+        muteRamp.prepare(sampleRate, 0.006, 1.0); // Click-free 6 ms mute/unmute.
         delayRamp.prepare(sampleRate, 0.035, 0.0);
     }
 
@@ -249,6 +251,7 @@ public:
         }
         gainRamp.setTarget(dbToGain(settings.levelDb.load(std::memory_order_relaxed)));
         polarityRamp.setTarget(settings.invertPolarity.load(std::memory_order_relaxed) ? -1.0 : 1.0);
+        muteRamp.setTarget(settings.outputMuted.load(std::memory_order_relaxed) ? 0.0 : 1.0);
         delayRamp.setTarget(std::clamp(settings.delayMs.load(std::memory_order_relaxed), 0.0, kMaxDelayMs)
                             * sampleRate / 1000.0);
     }
@@ -271,7 +274,7 @@ public:
         const float fraction = static_cast<float>(readPosition - static_cast<double>(earlier));
         const float delayed = delayBuffer[earlier] * (1.0f - fraction) + delayBuffer[later] * fraction;
         writeIndex = (writeIndex + 1) % delayBuffer.size();
-        return delayed * static_cast<float>(gainRamp.next() * polarityRamp.next());
+        return delayed * static_cast<float>(gainRamp.next() * polarityRamp.next() * muteRamp.next());
     }
 
 private:
@@ -284,6 +287,6 @@ private:
     std::array<std::array<double, 3>, kBands> oldValues {};
     std::vector<float> delayBuffer;
     std::size_t writeIndex = 0;
-    ParameterRamp gainRamp, polarityRamp, delayRamp;
+    ParameterRamp gainRamp, polarityRamp, delayRamp, muteRamp;
 };
 } // namespace dualdsp

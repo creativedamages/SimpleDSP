@@ -245,14 +245,20 @@ public:
         g.setFont(11.0f);
         g.setColour(mutedColour);
         g.drawText("SIGNAL (dBFS)", 10, 2, 130, 14, juce::Justification::centredLeft);
-        drawMeter(g, 19, "IN", values.inputPeak, values.inputRms, inputSignalColour);
-        drawMeter(g, 38, "OUT", values.outputPeak, values.outputRms, outputSignalColour);
+        drawMeter(g, 19, "IN", values.inputPeak, values.inputRms, values.inputClip, inputSignalColour);
+        drawMeter(g, 38, "OUT", values.outputPeak, values.outputRms, values.outputClip, outputSignalColour);
+    }
+    std::function<void(bool)> onClearClip;
+    void mouseUp(const juce::MouseEvent& event) override
+    {
+        if (event.x >= getWidth() - 46 && event.y >= 17 && event.y <= 55)
+            if (onClearClip) onClearClip(event.y < 37);
     }
 private:
     void drawMeter(juce::Graphics& g, int y, const juce::String& label,
-                   float peak, float rms, juce::Colour colour)
+                   float peak, float rms, bool clipped, juce::Colour colour)
     {
-        const float left = 48.0f, width = static_cast<float>(getWidth()) - 123.0f;
+        const float left = 48.0f, width = std::max(40.0f, static_cast<float>(getWidth()) - 170.0f);
         const auto position = [width](float db)
         {
             return width * juce::jlimit(0.0f, 1.0f, (db + 72.0f) / 72.0f);
@@ -266,8 +272,12 @@ private:
         g.setColour(peak >= -0.1f ? juce::Colours::red : colour.brighter(0.45f));
         g.fillRect(left + position(peak), static_cast<float>(y) - 1.0f, 3.0f, 14.0f);
         g.setColour(peak >= -0.1f ? juce::Colours::red : juce::Colours::white);
-        g.drawText(juce::String(peak, 1) + " dB", getWidth() - 74, y - 2, 69, 17,
+        g.drawText(juce::String(peak, 1) + " dB", getWidth() - 114, y - 2, 69, 17,
                    juce::Justification::centredRight);
+        g.setColour(clipped ? juce::Colour(0xffde3558) : juce::Colour(0xff34485a));
+        g.fillRoundedRectangle(static_cast<float>(getWidth() - 44), static_cast<float>(y - 2), 40.0f, 17.0f, 3.0f);
+        g.setColour(clipped ? juce::Colours::white : juce::Colour(0xff8195a6));
+        g.drawText("CLIP", getWidth() - 43, y - 2, 37, 17, juce::Justification::centred);
     }
     dualdsp::LiveLevels values;
 };
@@ -409,6 +419,23 @@ public:
         name.setColour(juce::TextEditor::textColourId, juce::Colours::white);
         name.onTextChange = [this]{ if (onNameChange) onNameChange(channelNumber - 1, name.getText()); };
         addAndMakeVisible(name);
+        muteButton.setClickingTogglesState(true);
+        muteButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff293947));
+        muteButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffb32e50));
+        muteButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+        muteButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        muteButton.setTooltip("Mute the selected output without changing its level");
+        muteButton.onClick = [this]
+        {
+            params.outputMuted.store(muteButton.getToggleState());
+            updateMuteButton();
+        };
+        addAndMakeVisible(muteButton);
+        updateMuteButton();
+        meters.onClearClip = [this](bool inputSignal)
+        {
+            if (onClipClear) onClipClear(channelNumber - 1, inputSignal);
+        };
         addAndMakeVisible(graph);
         addAndMakeVisible(meters);
         addAndMakeVisible(hp);
@@ -445,8 +472,14 @@ public:
         addAndMakeVisible(delay);
         level.onValueChange = [this] { params.levelDb.store(level.getValue()); };
         delay.onValueChange = [this] { params.delayMs.store(delay.getValue()); };
+        levelDelayToggle.onClick = [this]
+        {
+            controlsExpanded = !controlsExpanded;
+            updateExpandedSections();
+        };
+        addAndMakeVisible(levelDelayToggle);
 
-        polarity.setButtonText("Invert polarity (180\u00b0)");
+        polarity.setButtonText("Invert polarity (180 deg)");
         polarity.setToggleState(params.invertPolarity.load(), juce::dontSendNotification);
         polarity.setColour(juce::ToggleButton::tickColourId, accentColour);
         polarity.onClick = [this] { params.invertPolarity.store(polarity.getToggleState()); };
@@ -472,11 +505,13 @@ public:
 
     std::function<void(int, bool)> onRouteChange;
     std::function<void(int, juce::String)> onNameChange;
+    std::function<void(int, bool)> onClipClear;
     std::function<void()> onLayoutChanged;
 
     int preferredHeight() const noexcept
     {
-        const int eqY = filtersExpanded ? 783 : 634;
+        const int filterY = controlsExpanded ? 640 : 541;
+        const int eqY = filterY + (filtersExpanded ? 192 : 43);
         return eqY + (eqExpanded ? 451 : 49);
     }
 
@@ -486,6 +521,7 @@ public:
         level.setValue(params.levelDb.load(), juce::dontSendNotification);
         delay.setValue(params.delayMs.load(), juce::dontSendNotification);
         polarity.setToggleState(params.invertPolarity.load(), juce::dontSendNotification);
+        updateMuteButton();
         hp.sync(); lp.sync();
         for (auto& e : eqRows) e->sync();
         graph.repaint();
@@ -532,23 +568,26 @@ public:
     {
         const int w = getWidth();
         heading.setBounds(22, 18, 108, 37);
-        name.setBounds(132, 18, w - 154, 34);
+        name.setBounds(132, 18, w - 277, 34);
+        muteButton.setBounds(w - 133, 18, 110, 35);
         const int half = (w - 56) / 2;
         inputCaption.setBounds(22, 95, half, 19);
         outputCaption.setBounds(34 + half, 95, half, 19);
         input.setBounds(22, 119, half, 31);
         output.setBounds(34 + half, 119, half, 31);
         meters.setBounds(18, 158, w - 36, 57);
-        levelCaption.setBounds(22, 228, 110, 22);
-        delayCaption.setBounds(22, 273, 110, 22);
-        level.setBounds(131, 222, w - 153, 36);
-        delay.setBounds(131, 268, w - 153, 36);
-        polarity.setBounds(24, 314, w - 48, 30);
-        graph.setBounds(20, 355, w - 40, 225);
-        filtersToggle.setBounds(22, 591, w - 44, 31);
-        hp.setBounds(18, 627, w - 36, 70);
-        lp.setBounds(18, 703, w - 36, 70);
-        const int eqY = filtersExpanded ? 783 : 634;
+        polarity.setBounds(24, 226, w - 48, 30);
+        graph.setBounds(20, 267, w - 40, 225);
+        levelDelayToggle.setBounds(22, 501, w - 44, 31);
+        levelCaption.setBounds(22, 546, 110, 22);
+        delayCaption.setBounds(22, 590, 110, 22);
+        level.setBounds(131, 540, w - 153, 36);
+        delay.setBounds(131, 584, w - 153, 36);
+        const int filterY = controlsExpanded ? 640 : 541;
+        filtersToggle.setBounds(22, filterY, w - 44, 31);
+        hp.setBounds(18, filterY + 36, w - 36, 70);
+        lp.setBounds(18, filterY + 112, w - 36, 70);
+        const int eqY = filterY + (filtersExpanded ? 192 : 43);
         eqToggle.setBounds(22, eqY, w - 44, 31);
         headingLabels.setBounds(70, eqY + 29, w - 85, 22);
         for (int i = 0; i < dualdsp::kBands; ++i)
@@ -556,8 +595,19 @@ public:
     }
 
 private:
+    void updateMuteButton()
+    {
+        const bool muted = params.outputMuted.load();
+        muteButton.setToggleState(muted, juce::dontSendNotification);
+        muteButton.setButtonText(muted ? "MUTED" : "MUTE OUT");
+    }
     void updateExpandedSections()
     {
+        levelCaption.setVisible(controlsExpanded);
+        delayCaption.setVisible(controlsExpanded);
+        level.setVisible(controlsExpanded);
+        delay.setVisible(controlsExpanded);
+        levelDelayToggle.setButtonText(controlsExpanded ? "Hide level / delay" : "Show level / delay");
         hp.setVisible(filtersExpanded);
         lp.setVisible(filtersExpanded);
         headingLabels.setVisible(eqExpanded);
@@ -569,11 +619,11 @@ private:
         resized();
         if (onLayoutChanged) onLayoutChanged();
     }
-    bool filtersExpanded = false, eqExpanded = false;
+    bool controlsExpanded = false, filtersExpanded = false, eqExpanded = false;
     int channelNumber;
     dualdsp::ChannelSettings& params;
     juce::Label heading, inputCaption, outputCaption, levelCaption, delayCaption, headingLabels;
-    juce::TextButton filtersToggle, eqToggle;
+    juce::TextButton filtersToggle, eqToggle, levelDelayToggle, muteButton;
     juce::TextEditor name;
     ResponseGraph graph { params };
     MeterPair meters;
@@ -723,6 +773,12 @@ public:
         strips.right.onRouteChange = [this](int changed, bool outputChanged) { routeChanged(changed, outputChanged); };
         strips.left.onNameChange = [this](int ch, juce::String n) { setName(ch, n); };
         strips.right.onNameChange = [this](int ch, juce::String n) { setName(ch, n); };
+        const auto clearClip = [this](int ch, bool inputSignal)
+        {
+            engine.telemetry[static_cast<std::size_t>(ch)].clearClip(inputSignal);
+        };
+        strips.left.onClipClear = clearClip;
+        strips.right.onClipClear = clearClip;
 
         auto savedDevice = juce::XmlDocument::parse(deviceStateFile());
         const auto error = deviceManager.initialise(2, 2, savedDevice.get(), true);
@@ -1203,6 +1259,7 @@ private:
             c->setProperty("levelDb", p.levelDb.load());
             c->setProperty("delayMs", p.delayMs.load());
             c->setProperty("invertPolarity", p.invertPolarity.load());
+            c->setProperty("outputMuted", p.outputMuted.load());
             juce::Array<juce::var> bands, curve;
             for (const auto& band : p.eq)
             {
@@ -1254,6 +1311,8 @@ private:
             obj->setProperty("inputRms", levels[i].inputRms);
             obj->setProperty("outputPeak", levels[i].outputPeak);
             obj->setProperty("outputRms", levels[i].outputRms);
+            obj->setProperty("inputClip", levels[i].inputClip);
+            obj->setProperty("outputClip", levels[i].outputClip);
             juce::Array<juce::var> spectrum;
             for (const auto value : spectra[i]) spectrum.add(value);
             obj->setProperty("rta", juce::var(spectrum));
@@ -1285,6 +1344,10 @@ private:
             p.levelDb.store(std::clamp(static_cast<double>(c.getProperty("levelDb", 0.0)), -90.0, 18.0));
             p.delayMs.store(std::clamp(static_cast<double>(c.getProperty("delayMs", 0.0)), 0.0, dualdsp::kMaxDelayMs));
             p.invertPolarity.store(static_cast<bool>(c.getProperty("invertPolarity", false)));
+            // Older presets lack outputMuted. Preserve a current safety mute
+            // instead of unexpectedly opening an output during import.
+            if (c.hasProperty("outputMuted"))
+                p.outputMuted.store(static_cast<bool>(c.getProperty("outputMuted", false)));
             const auto bands = c.getProperty("eq", {});
             if (bands.isArray())
                 for (int b = 0; b < dualdsp::kBands && b < bands.getArray()->size(); ++b)
@@ -1336,6 +1399,9 @@ private:
         else if (key == "levelDb") p.levelDb.store(std::clamp(numerical, -90.0, 18.0));
         else if (key == "delayMs") p.delayMs.store(std::clamp(numerical, 0.0, dualdsp::kMaxDelayMs));
         else if (key == "invertPolarity") p.invertPolarity.store(static_cast<bool>(value));
+        else if (key == "outputMuted") p.outputMuted.store(static_cast<bool>(value));
+        else if (key == "clearInputClip") engine.telemetry[index].clearClip(true);
+        else if (key == "clearOutputClip") engine.telemetry[index].clearClip(false);
         else if (key == "inputRoute" || key == "outputRoute")
         {
             const int route = static_cast<int>(value);
