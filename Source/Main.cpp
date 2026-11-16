@@ -1259,6 +1259,7 @@ private:
             c->setProperty("levelDb", p.levelDb.load());
             c->setProperty("delayMs", p.delayMs.load());
             c->setProperty("invertPolarity", p.invertPolarity.load());
+            c->setProperty("outputMuted", p.outputMuted.load());
             juce::Array<juce::var> bands, curve;
             for (const auto& band : p.eq)
             {
@@ -1310,6 +1311,8 @@ private:
             obj->setProperty("inputRms", levels[i].inputRms);
             obj->setProperty("outputPeak", levels[i].outputPeak);
             obj->setProperty("outputRms", levels[i].outputRms);
+            obj->setProperty("inputClip", levels[i].inputClip);
+            obj->setProperty("outputClip", levels[i].outputClip);
             juce::Array<juce::var> spectrum;
             for (const auto value : spectra[i]) spectrum.add(value);
             obj->setProperty("rta", juce::var(spectrum));
@@ -1341,6 +1344,10 @@ private:
             p.levelDb.store(std::clamp(static_cast<double>(c.getProperty("levelDb", 0.0)), -90.0, 18.0));
             p.delayMs.store(std::clamp(static_cast<double>(c.getProperty("delayMs", 0.0)), 0.0, dualdsp::kMaxDelayMs));
             p.invertPolarity.store(static_cast<bool>(c.getProperty("invertPolarity", false)));
+            // Older presets lack outputMuted. Preserve a current safety mute
+            // instead of unexpectedly opening an output during import.
+            if (c.hasProperty("outputMuted"))
+                p.outputMuted.store(static_cast<bool>(c.getProperty("outputMuted", false)));
             const auto bands = c.getProperty("eq", {});
             if (bands.isArray())
                 for (int b = 0; b < dualdsp::kBands && b < bands.getArray()->size(); ++b)
@@ -1392,6 +1399,9 @@ private:
         else if (key == "levelDb") p.levelDb.store(std::clamp(numerical, -90.0, 18.0));
         else if (key == "delayMs") p.delayMs.store(std::clamp(numerical, 0.0, dualdsp::kMaxDelayMs));
         else if (key == "invertPolarity") p.invertPolarity.store(static_cast<bool>(value));
+        else if (key == "outputMuted") p.outputMuted.store(static_cast<bool>(value));
+        else if (key == "clearInputClip") engine.telemetry[index].clearClip(true);
+        else if (key == "clearOutputClip") engine.telemetry[index].clearClip(false);
         else if (key == "inputRoute" || key == "outputRoute")
         {
             const int route = static_cast<int>(value);
