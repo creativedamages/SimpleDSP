@@ -1,4 +1,4 @@
-# Simple DSP — Windows application v0.5
+# Simple DSP — Windows application v0.5.1
 
 **Simple DSP** is a locally running JUCE-based Windows audio processor with two separate mono processing paths today. The branding does not specify a channel count because more channels may be added in a future update.
 
@@ -33,6 +33,12 @@
 - Audio telemetry writes only atomic samples in the real-time callback. Both FFT analyses execute on the Windows GUI timer.
 
 **The two traces are uncalibrated digital signal spectra, not a phase-coherent transfer function or acoustic measurement.** Input/output comparisons may also reflect delay, levels and any unrelated source variations.
+
+## v0.5.1 — Consistent input/output monitoring colors
+
+- **Input (pre-DSP): cyan** on the Windows and phone audio meters and input RTA spectrum.
+- **Output (post-DSP): pink** on the Windows and phone audio meters and output RTA spectrum.
+- **Computed EQ response: gold**, deliberately distinct from both measured traces. The underlying signal analysis and presets are unchanged.
 
 ## Current channel processing
 
