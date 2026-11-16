@@ -405,9 +405,12 @@ public:
         addAndMakeVisible(meters);
         addAndMakeVisible(hp);
         addAndMakeVisible(lp);
-        filtersCaption.setText("HIGH-PASS / LOW-PASS", juce::dontSendNotification);
-        filtersCaption.setColour(juce::Label::textColourId, accentColour);
-        addAndMakeVisible(filtersCaption);
+        filtersToggle.onClick = [this]
+        {
+            filtersExpanded = !filtersExpanded;
+            updateExpandedSections();
+        };
+        addAndMakeVisible(filtersToggle);
 
         inputCaption.setText("INPUT ROUTE", juce::dontSendNotification);
         outputCaption.setText("OUTPUT ROUTE", juce::dontSendNotification);
@@ -441,9 +444,12 @@ public:
         polarity.onClick = [this] { params.invertPolarity.store(polarity.getToggleState()); };
         addAndMakeVisible(polarity);
 
-        eqCaption.setText("PARAMETRIC EQ  /  6 BANDS", juce::dontSendNotification);
-        eqCaption.setColour(juce::Label::textColourId, accentColour);
-        addAndMakeVisible(eqCaption);
+        eqToggle.onClick = [this]
+        {
+            eqExpanded = !eqExpanded;
+            updateExpandedSections();
+        };
+        addAndMakeVisible(eqToggle);
         headingLabels.setText("FREQUENCY                         GAIN                         Q", juce::dontSendNotification);
         headingLabels.setColour(juce::Label::textColourId, mutedColour);
         addAndMakeVisible(headingLabels);
@@ -453,10 +459,18 @@ public:
             eqRows[static_cast<std::size_t>(i)] = std::make_unique<EqRow>(i, params.eq[static_cast<std::size_t>(i)]);
             addAndMakeVisible(*eqRows[static_cast<std::size_t>(i)]);
         }
+        updateExpandedSections(); // Default: filters and EQ settings hidden.
     }
 
     std::function<void(int, bool)> onRouteChange;
     std::function<void(int, juce::String)> onNameChange;
+    std::function<void()> onLayoutChanged;
+
+    int preferredHeight() const noexcept
+    {
+        const int eqY = filtersExpanded ? 783 : 634;
+        return eqY + (eqExpanded ? 451 : 49);
+    }
 
     void sync(const juce::String& newName)
     {
@@ -523,19 +537,35 @@ public:
         delay.setBounds(131, 268, w - 153, 36);
         polarity.setBounds(24, 314, w - 48, 30);
         graph.setBounds(20, 355, w - 40, 225);
-        filtersCaption.setBounds(22, 591, w - 44, 27);
-        hp.setBounds(18, 621, w - 36, 70);
-        lp.setBounds(18, 699, w - 36, 70);
-        eqCaption.setBounds(22, 780, w - 44, 28);
-        headingLabels.setBounds(70, 809, w - 85, 22);
+        filtersToggle.setBounds(22, 591, w - 44, 31);
+        hp.setBounds(18, 627, w - 36, 70);
+        lp.setBounds(18, 703, w - 36, 70);
+        const int eqY = filtersExpanded ? 783 : 634;
+        eqToggle.setBounds(22, eqY, w - 44, 31);
+        headingLabels.setBounds(70, eqY + 29, w - 85, 22);
         for (int i = 0; i < dualdsp::kBands; ++i)
-            eqRows[static_cast<std::size_t>(i)]->setBounds(18, 835 + i * 65, w - 36, 59);
+            eqRows[static_cast<std::size_t>(i)]->setBounds(18, eqY + 54 + i * 65, w - 36, 59);
     }
 
 private:
+    void updateExpandedSections()
+    {
+        hp.setVisible(filtersExpanded);
+        lp.setVisible(filtersExpanded);
+        headingLabels.setVisible(eqExpanded);
+        for (auto& row : eqRows) if (row) row->setVisible(eqExpanded);
+        filtersToggle.setButtonText(filtersExpanded ? "▼ Filters · High-pass / Low-pass" :
+                                                       "▶ Filters · High-pass / Low-pass");
+        eqToggle.setButtonText(eqExpanded ? "▼ Parametric EQ · 6 bands" :
+                                           "▶ Parametric EQ · 6 bands");
+        resized();
+        if (onLayoutChanged) onLayoutChanged();
+    }
+    bool filtersExpanded = false, eqExpanded = false;
     int channelNumber;
     dualdsp::ChannelSettings& params;
-    juce::Label heading, inputCaption, outputCaption, levelCaption, delayCaption, eqCaption, headingLabels, filtersCaption;
+    juce::Label heading, inputCaption, outputCaption, levelCaption, delayCaption, headingLabels;
+    juce::TextButton filtersToggle, eqToggle;
     juce::TextEditor name;
     ResponseGraph graph { params };
     MeterPair meters;
@@ -555,13 +585,20 @@ public:
     {
         addAndMakeVisible(left);
         addAndMakeVisible(right);
-        setSize(1150, 1285);
+        left.onLayoutChanged = [this] { refreshHeight(); };
+        right.onLayoutChanged = [this] { refreshHeight(); };
+        refreshHeight();
+    }
+
+    void refreshHeight()
+    {
+        setSize(1150, std::max(left.preferredHeight(), right.preferredHeight()));
     }
 
     void resized() override
     {
-        left.setBounds(0, 0, 565, 1280);
-        right.setBounds(585, 0, 565, 1280);
+        left.setBounds(0, 0, 565, getHeight());
+        right.setBounds(585, 0, 565, getHeight());
     }
 
     ChannelStrip left, right;
