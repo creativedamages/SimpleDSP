@@ -16,6 +16,9 @@ const auto backgroundColour = juce::Colour(0xff131820);
 const auto panelColour = juce::Colour(0xff222b38);
 const auto mutedColour = juce::Colour(0xffa7b4c6);
 const auto accentColour = juce::Colour(0xff65cad8);
+const auto inputSignalColour = juce::Colour(0xff65cad8);  // Cyan: pre-DSP
+const auto outputSignalColour = juce::Colour(0xffff69b4); // Pink: post-DSP
+const auto eqCurveColour = juce::Colour(0xfff6cd70);      // Gold: calculated EQ response
 
 void setupSlider(juce::Slider& slider, double low, double high, double step,
                  double initial, const juce::String& suffix)
@@ -237,8 +240,8 @@ public:
         g.setFont(11.0f);
         g.setColour(mutedColour);
         g.drawText("SIGNAL (dBFS)", 10, 2, 130, 14, juce::Justification::centredLeft);
-        drawMeter(g, 19, "IN", values.inputPeak, values.inputRms, juce::Colour(0xff65cad8));
-        drawMeter(g, 38, "OUT", values.outputPeak, values.outputRms, juce::Colour(0xff71daa6));
+        drawMeter(g, 19, "IN", values.inputPeak, values.inputRms, inputSignalColour);
+        drawMeter(g, 38, "OUT", values.outputPeak, values.outputRms, outputSignalColour);
     }
 private:
     void drawMeter(juce::Graphics& g, int y, const juce::String& label,
@@ -249,7 +252,7 @@ private:
         {
             return width * juce::jlimit(0.0f, 1.0f, (db + 72.0f) / 72.0f);
         };
-        g.setColour(mutedColour);
+        g.setColour(colour);
         g.drawText(label, 10, y - 2, 36, 17, juce::Justification::centredLeft);
         g.setColour(juce::Colour(0xff293745));
         g.fillRoundedRectangle(left, static_cast<float>(y), width, 12.0f, 3.0f);
@@ -340,14 +343,14 @@ public:
             g.setColour(colour.withAlpha(lineAlpha));
             g.strokePath(trace, juce::PathStrokeType(width));
         };
-        drawRta(inputRta, juce::Colour(0xff8fa5d9), 0.07f, 0.70f, 1.2f);
-        drawRta(outputRta, juce::Colour(0xff4ecf9d), 0.13f, 0.90f, 1.5f);
+        drawRta(inputRta, inputSignalColour, 0.07f, 0.80f, 1.2f);
+        drawRta(outputRta, outputSignalColour, 0.13f, 0.90f, 1.5f);
         g.setColour(juce::Colour(0xffc0d2e4));
         g.setFont(10.0f);
-        g.drawText("IN: blue   OUT: green", static_cast<int>(chart.getX()) + 6,
+        g.drawText("IN: cyan   OUT: pink", static_cast<int>(chart.getX()) + 6,
                    static_cast<int>(chart.getY()) + 2, 190, 15, juce::Justification::left);
 
-        g.setColour(juce::Colour(0xff70d6aa));
+        g.setColour(mutedColour);
         g.setFont(10.0f);
         g.drawText("0", static_cast<int>(chart.getRight()) + 3,
                    static_cast<int>(chart.getY()) - 6, 30, 13, juce::Justification::left);
@@ -366,7 +369,7 @@ public:
             if (i == 0) response.startNewSubPath(x, y);
             else response.lineTo(x, y);
         }
-        g.setColour(accentColour);
+        g.setColour(eqCurveColour);
         g.strokePath(response, juce::PathStrokeType(2.1f));
         g.setColour(juce::Colour(0xfff6cd70));
         for (const auto& band : params.eq)

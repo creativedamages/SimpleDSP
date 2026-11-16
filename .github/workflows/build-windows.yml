@@ -3,7 +3,7 @@ name: Build Windows application
 on:
   workflow_dispatch:
   push:
-    branches: [ main, master, feature/v0.5-dual-rta-collapsible ]
+    branches: [ main, master, feature/v0.5.1-cyan-pink-meter-rta ]
 
 permissions:
   contents: read
@@ -48,7 +48,7 @@ jobs:
           if (-not $exe) { throw 'The Windows app executable was not found after compiling.' }
           Copy-Item $exe.FullName -Destination 'package/Simple DSP.exe'
           @'
-          SIMPLE DSP - WINDOWS v0.5
+          SIMPLE DSP - WINDOWS v0.5.1
 
           Run "Simple DSP.exe" on Windows 10/11 (64-bit).
           No Visual Studio, compiler or .NET runtime is required on your PC.
