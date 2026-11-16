@@ -45,6 +45,7 @@ public:
         sampleRate = std::max(8000.0, newSampleRate); // audio callback thread only
         writePosition = 0;
         publishedPosition.store(0, std::memory_order_release);
+        for (auto& v : inputRing) v.store(0.0f, std::memory_order_relaxed);
         for (auto& v : outputRing) v.store(0.0f, std::memory_order_relaxed);
         for (auto& v : peakWindow) v.store(0.0f, std::memory_order_relaxed);
         for (auto& v : rmsPower) v.store(0.0f, std::memory_order_relaxed);
