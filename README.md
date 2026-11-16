@@ -1,4 +1,4 @@
-# Simple DSP — Windows application v0.5.3
+# Simple DSP — Windows application v0.6.0
 
 **Simple DSP** is a locally running JUCE-based Windows audio processor with two separate mono processing paths today. The branding does not specify a channel count because more channels may be added in a future update.
 
@@ -51,6 +51,15 @@
 - Use plain ASCII labels for native **Save preset...**, **Load preset...**, and **Startup file...** buttons to avoid broken ellipsis glyphs on some Windows/JUCE combinations.
 - Filter and EQ disclosure buttons now say **Show** / **Hide** instead of relying on glyph arrows or centered separators. This is a visual-label change only.
 - The UTF-8 compiler option from v0.5.2 remains enabled; processing, remote layout, and presets are unchanged.
+
+## v0.6.0 — Safer levels, mute, clip indication and improved bass RTA
+
+- Each output has a conspicuous **MUTE OUT** / **MUTED** button beside the channel name on Windows and the mobile controller. Mute is independent of gain and fades in/out over about **6 ms** to reduce clicks. The mute state is included in new saved presets and synchronized between both interfaces. Importing older presets without a mute property **does not unmute an already-muted output**.
+- **Level and Delay** are grouped into a separate independently collapsible section, hidden by default on Windows and on the mobile remote to reduce unintended touchscreen changes. The routing, meters, mute buttons, polarity, and EQ/RTA graph remain visible.
+- The Windows polarity text is changed to **Invert polarity (180 deg)** to avoid misrendered degree glyphs.
+- Independent **input** and **output** red **CLIP** indicators latch when a digital sample reaches or exceeds full scale (absolute sample magnitude >= 1.0). Tap a CLIP indicator on either Windows or phone to clear that indicator; it relatches immediately if audio continues clipping. Meter color remains input cyan/output pink.
+- The analyzer uses a **16,384-point FFT** rather than 4,096 points, improving low-bass frequency-bin resolution at 48 kHz from approximately 11.7 Hz to 2.93 Hz. Fractional-bin interpolation below 80 Hz removes artificial repeated-value plateaus. This requires a longer (~341 ms at 48 kHz) sample window but does not add audio-path latency.
+- The calculated EQ curve and digital input/output RTA remain distinct; this is not a phase-coherent transfer function or calibrated acoustic measurement. Current audio-interface routes and preset storage location are unchanged.
 
 ## Current channel processing
 
