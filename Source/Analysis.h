@@ -11,8 +11,8 @@
 
 namespace dualdsp
 {
-constexpr int kRtaFftSize = 4096;
-constexpr int kRtaRingSize = 8192;
+constexpr int kRtaFftSize = 16384;
+constexpr int kRtaRingSize = 32768;
 constexpr int kRtaBins = 128;
 constexpr double kMeterFloorDb = -96.0;
 static_assert(std::atomic<float>::is_always_lock_free && std::atomic<std::uint64_t>::is_always_lock_free,
@@ -30,6 +30,8 @@ struct LiveLevels
     float inputRms = static_cast<float>(kMeterFloorDb);
     float outputPeak = static_cast<float>(kMeterFloorDb);
     float outputRms = static_cast<float>(kMeterFloorDb);
+    bool inputClip = false;
+    bool outputClip = false;
 };
 
 class AudioTelemetry
@@ -50,6 +52,8 @@ public:
         for (auto& v : peakWindow) v.store(0.0f, std::memory_order_relaxed);
         for (auto& v : rmsPower) v.store(0.0f, std::memory_order_relaxed);
         for (auto& v : rmsState) v = 0.0;
+        inputClipped.store(false, std::memory_order_release);
+        outputClipped.store(false, std::memory_order_release);
     }
     // Executed after both routing and DSP; null pointers represent an unassigned path.
     // Single producer = audio callback. No memory allocations, locks, or FFT here.
@@ -73,6 +77,9 @@ public:
             ++writePosition;
         }
         publishedPosition.store(writePosition, std::memory_order_release);
+        // A clip latches until an explicit reset from either user interface.
+        if (peaks[0] >= 1.0f) inputClipped.store(true, std::memory_order_release);
+        if (peaks[1] >= 1.0f) outputClipped.store(true, std::memory_order_release);
         const double alpha = std::exp(-static_cast<double>(count) / (sampleRate * 0.14));
         for (int i = 0; i < 2; ++i)
         {
@@ -92,7 +99,13 @@ public:
         v.outputPeak = amplitudeToDb(peakWindow[1].exchange(0.0f, std::memory_order_acq_rel));
         v.inputRms = amplitudeToDb(std::sqrt(std::max(0.0f, rmsPower[0].load(std::memory_order_acquire))));
         v.outputRms = amplitudeToDb(std::sqrt(std::max(0.0f, rmsPower[1].load(std::memory_order_acquire))));
+        v.inputClip = inputClipped.load(std::memory_order_acquire);
+        v.outputClip = outputClipped.load(std::memory_order_acquire);
         return v;
+    }
+    void clearClip(bool inputSignal) noexcept
+    {
+        (inputSignal ? inputClipped : outputClipped).store(false, std::memory_order_release);
     }
     bool copyLatest(std::array<float, kRtaFftSize>& dest, bool inputSignal = false) const noexcept
     {
@@ -114,6 +127,7 @@ private:
     std::array<std::atomic<float>, 2> peakWindow {};
     std::array<std::atomic<float>, 2> rmsPower {};
     std::array<double, 2> rmsState { 0.0, 0.0 };
+    std::atomic<bool> inputClipped { false }, outputClipped { false };
 };
 
 class SpectrumAnalyzer
@@ -163,11 +177,23 @@ public:
         for (int index = 0; index < kRtaBins; ++index)
         {
             const double hz = 20.0 * std::pow(lastFrequency / 20.0, static_cast<double>(index) / (kRtaBins - 1));
-            // Narrow log-frequency bucket, with at least 1 FFT bin at low frequencies.
-            const double halfBand = std::pow(2.0, 1.0 / 24.0);
-            const int start = std::clamp(static_cast<int>(std::round(hz / halfBand / frequencyPerBin)), 1, kRtaFftSize/2-1);
-            const int stop = std::clamp(static_cast<int>(std::round(hz * halfBand / frequencyPerBin)), start, kRtaFftSize/2-1);
-            double maxAmp = 0.0;
+            // Interpolate the magnitude spectrum at fractional FFT-bin positions.
+            // The old rounded-bin maximum repeated identical low-frequency values,
+            // creating artificial staircase-shaped traces in the bass.
+            const double position = std::clamp(hz / frequencyPerBin, 1.0,
+                                                static_cast<double>(kRtaFftSize / 2 - 2));
+            const int below = static_cast<int>(std::floor(position));
+            const double blend = position - below;
+            const double low = std::abs(spectrum[static_cast<std::size_t>(below)]);
+            const double high = std::abs(spectrum[static_cast<std::size_t>(below + 1)]);
+            const double interpolated = low + (high - low) * blend;
+            // Retain peak response around strong narrowband tones while smoothing
+            // adjacent log bins. Width broadens with frequency but never drops
+            // below one FFT bin, preserving useful bass detail at 48 kHz.
+            const double halfBandwidth = std::max(frequencyPerBin, hz * 0.030);
+            const int start = std::clamp(static_cast<int>(std::ceil((hz - halfBandwidth) / frequencyPerBin)), 1, kRtaFftSize/2-1);
+            const int stop = std::clamp(static_cast<int>(std::floor((hz + halfBandwidth) / frequencyPerBin)), start, kRtaFftSize/2-1);
+            double maxAmp = interpolated;
             for (int k = start; k <= stop; ++k)
                 maxAmp = std::max(maxAmp, std::abs(spectrum[static_cast<std::size_t>(k)]));
             const float level = amplitudeToDb(static_cast<float>(maxAmp * (4.0 / (kRtaFftSize - 1))));
