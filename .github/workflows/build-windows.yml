@@ -22,7 +22,8 @@ jobs:
           $source = Get-Content Source/RemotePage.h -Raw
           $script = [regex]::Match($source, '(?s)<script>(.*?)</script>')
           if (-not $script.Success) { throw 'Embedded mobile script not found' }
-          Set-Content -Path remote-check.js -Value $script.Groups[1].Value -Encoding utf8
+          $javascript = $script.Groups[1].Value -replace '\)DSP_HTML"\s*R"DSP_HTML\(', ''
+          Set-Content -Path remote-check.js -Value $javascript -Encoding utf8
           node --check remote-check.js
 
       - name: Configure JUCE project
