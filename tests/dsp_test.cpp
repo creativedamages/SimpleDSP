@@ -1,4 +1,5 @@
 #include "../Source/DSP.h"
+#include "../Source/TestSignal.h"
 #include "../Source/ProjectSettings.h"
 #include <cassert>
 #include <cmath>
@@ -16,6 +17,46 @@ int main()
     assert(!htdsp::outputIsAssigned(routes, 15, 62));
     assert(!htdsp::outputIsAssigned(routes, 15, -1));
 
+
+    htdsp::TestSignalSettings testSettings;
+    htdsp::TestSignalGenerator generator;
+    generator.prepare(48000);
+    generator.beginBlock(testSettings);
+    for (int i = 0; i < 1000; ++i) assert(generator.next() == 0.0f);
+    testSettings.enabled.store(true);
+    testSettings.mode.store(2);
+    testSettings.frequency.store(123);
+    testSettings.levelDb.store(-20);
+    generator.beginBlock(testSettings);
+    for (int i = 0; i < 4800; ++i) generator.next();
+    double tonePower = 0;
+    int crossings = 0;
+    float previous = generator.next();
+    for (int i = 0; i < 48000; ++i)
+    {
+        const float value = generator.next();
+        assert(std::abs(value) <= 0.10001f);
+        tonePower += value * value;
+        if (previous <= 0 && value > 0) ++crossings;
+        previous = value;
+    }
+    assert(crossings >= 999 && crossings <= 1001);
+    assert(std::abs(tonePower / 48000 - 0.005) < 0.00001);
+    testSettings.enabled.store(false);
+    generator.beginBlock(testSettings);
+    for (int i = 0; i < 1000; ++i) generator.next();
+    assert(generator.next() == 0.0f);
+    testSettings.enabled.store(true);
+    testSettings.mode.store(0);
+    generator.beginBlock(testSettings);
+    double noisePower = 0;
+    for (int i = 0; i < 48000; ++i)
+    {
+        const float value = generator.next();
+        assert(std::isfinite(value) && std::abs(value) <= 0.10001f);
+        noisePower += value * value;
+    }
+    assert(noisePower > 0.01);
     using namespace dualdsp;
     ChannelSettings settings;
     MonoProcessor processor;

@@ -11,3 +11,12 @@ HT DSP saves 16-channel `.dsp.json` presets and can load a preset at launch. The
 ## Build
 
 Use GitHub Actions and download the **HTDSP-Windows-x64** artifact once the Windows run passes. For a local build, run `build-windows.ps1` or `build-windows.bat` with CMake and Visual Studio 2022 installed.
+
+
+## Test generator
+
+The global generator offers pink noise, an adjustable 20 Hz–20 kHz sine oscillator, and a fixed 1 kHz tone. Global level ranges from -90 to 0 dBFS and defaults to -40 dBFS. The level is a peak ceiling. Pink noise has a lower average level than a sine at the same setting.
+
+Each channel's Use test signal checkbox replaces its physical input before EQ, filters, delay, level and mute. Selected channels receive the same signal. When the generator is off, selected channels receive silence. Unchecking restores the physical input. Engaging a channel while the generator is on asks for confirmation on Windows and the phone.
+
+Generator controls and channel assignments are session-only and start off when the app launches. Presets retain the existing DSP settings. Frequency is limited below Nyquist when the audio device uses a low sample rate.

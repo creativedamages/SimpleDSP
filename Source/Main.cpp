@@ -5,6 +5,7 @@
 #include <array>
 #include <bitset>
 #include "ProjectSettings.h"
+#include "TestSignal.h"
 #include <functional>
 #include <future>
 #include <chrono>
@@ -48,6 +49,9 @@ public:
     std::array<dualdsp::ChannelSettings, htdsp::channelCount> parameters;
     std::array<dualdsp::AudioTelemetry, htdsp::channelCount> telemetry;
 
+    htdsp::TestSignalSettings testSettings;
+    std::array<std::atomic<bool>, htdsp::channelCount> testInputs {};
+
     AudioEngine()
     {
         for (auto& route : callbackInputs) route.store(-1);
@@ -57,6 +61,9 @@ public:
     void audioDeviceAboutToStart(juce::AudioIODevice* device) override
     {
         const auto sampleRate = device != nullptr ? device->getCurrentSampleRate() : 48000.0;
+        generator.prepare(sampleRate);
+        sourceBlend.fill(0.0f);
+        blendStep = static_cast<float>(1.0 / (sampleRate * 0.01));
         for (int ch = 0; ch < htdsp::channelCount; ++ch)
             processors[ch].prepare(sampleRate, parameters[ch].outputMuted.load());
         for (auto& meter : telemetry) meter.prepare(sampleRate);
@@ -102,28 +109,34 @@ public:
             if (outputData[output] != nullptr)
                 juce::FloatVectorOperations::clear(outputData[output], numSamples);
 
+        generator.beginBlock(testSettings);
         for (int path = 0; path < htdsp::channelCount; ++path)
+            processors[path].beginBlock(parameters[path]);
+        std::array<float, 256> generated {}, selectedInput {};
+        for (int offset = 0; offset < numSamples; offset += 256)
         {
-            const auto& params = parameters[static_cast<std::size_t>(path)];
-            const int inputRoute = callbackInputs[static_cast<std::size_t>(path)].load(std::memory_order_acquire);
-            const int outputRoute = callbackOutputs[static_cast<std::size_t>(path)].load(std::memory_order_acquire);
-
-            // Input metering must remain active even if the output route is unassigned.
-            const float* source = inputRoute >= 0 && inputRoute < inputCount
-                ? inputData[inputRoute] : nullptr;
-            float* destination = outputRoute >= 0 && outputRoute < outputCount
-                ? outputData[outputRoute] : nullptr;
-            if (source == nullptr || destination == nullptr)
+            const int count = std::min(256, numSamples - offset);
+            for (int n = 0; n < count; ++n) generated[n] = generator.next();
+            for (int path = 0; path < htdsp::channelCount; ++path)
             {
-                telemetry[static_cast<std::size_t>(path)].recordBlock(source, nullptr, numSamples);
-                continue;
+                const int input = callbackInputs[path].load();
+                const int output = callbackOutputs[path].load();
+                const float* source = input >= 0 && input < inputCount && inputData[input]
+                    ? inputData[input] + offset : nullptr;
+                float* destination = output >= 0 && output < outputCount && outputData[output]
+                    ? outputData[output] + offset : nullptr;
+                const float target = testInputs[path].load() ? 1.0f : 0.0f;
+                for (int n = 0; n < count; ++n)
+                {
+                    auto& blend = sourceBlend[path];
+                    blend += std::clamp(target - blend, -blendStep, blendStep);
+                    const float live = source ? source[n] : 0.0f;
+                    selectedInput[n] = live * (1.0f - blend) + generated[n] * blend;
+                    const float result = processors[path].process(selectedInput[n]);
+                    if (destination) destination[n] = result;
+                }
+                telemetry[path].recordBlock(selectedInput.data(), destination, count);
             }
-
-            auto& processor = processors[static_cast<std::size_t>(path)];
-            processor.beginBlock(params);
-            for (int sample = 0; sample < numSamples; ++sample)
-                destination[sample] = processor.process(source[sample]);
-            telemetry[static_cast<std::size_t>(path)].recordBlock(source, destination, numSamples);
         }
     }
 
@@ -137,6 +150,9 @@ private:
         return index;
     }
 
+    htdsp::TestSignalGenerator generator;
+    std::array<float, htdsp::channelCount> sourceBlend {};
+    float blendStep = 0.002f;
     std::array<dualdsp::MonoProcessor, htdsp::channelCount> processors;
     std::array<std::atomic<int>, htdsp::channelCount> callbackInputs {}, callbackOutputs {};
 };
@@ -488,6 +504,12 @@ public:
         };
         addAndMakeVisible(levelDelayToggle);
 
+        testInput.setButtonText("Use test signal");
+        addAndMakeVisible(testInput);
+        testInput.onClick = [this]
+        {
+            if (onTestInputChange) onTestInputChange(channelNumber - 1, testInput.getToggleState());
+        };
         polarity.setButtonText("Invert polarity (180 deg)");
         polarity.setToggleState(params.invertPolarity.load(), juce::dontSendNotification);
         polarity.setColour(juce::ToggleButton::tickColourId, accentColour);
@@ -512,6 +534,8 @@ public:
         updateExpandedSections(); // Default: filters and EQ settings hidden.
     }
 
+    std::function<void(int, bool)> onTestInputChange;
+    void setTestInput(bool enabled) { testInput.setToggleState(enabled, juce::dontSendNotification); }
     std::function<void(int, bool)> onRouteChange;
     std::function<void(int, juce::String)> onNameChange;
     std::function<void(int, bool)> onClipClear;
@@ -585,7 +609,8 @@ public:
         input.setBounds(22, 119, half, 31);
         output.setBounds(34 + half, 119, half, 31);
         meters.setBounds(18, 158, w - 36, 57);
-        polarity.setBounds(24, 226, w - 48, 30);
+        polarity.setBounds(24, 226, 240, 30);
+        testInput.setBounds(w - 190, 226, 170, 30);
         graph.setBounds(20, 267, w - 40, 225);
         levelDelayToggle.setBounds(22, 501, w - 44, 31);
         levelCaption.setBounds(22, 546, 110, 22);
@@ -640,7 +665,7 @@ private:
     CutoffRow lp { "Low-pass enabled", params.lowPass };
     juce::ComboBox input, output;
     juce::Slider level, delay;
-    juce::ToggleButton polarity;
+    juce::ToggleButton polarity, testInput;
     std::array<std::unique_ptr<EqRow>, dualdsp::kBands> eqRows;
 };
 
@@ -717,6 +742,25 @@ public:
             syncStrips();
         };
         addAndMakeVisible(channelSelect);
+
+        generatorEnabled.setButtonText("Test generator ON");
+        generatorEnabled.onClick = [this] { engine.testSettings.enabled.store(generatorEnabled.getToggleState()); };
+        generatorMode.addItem("Pink noise", 1);
+        generatorMode.addItem("Sine oscillator", 2);
+        generatorMode.addItem("1 kHz tone", 3);
+        generatorMode.setSelectedId(1, juce::dontSendNotification);
+        generatorMode.onChange = [this] { engine.testSettings.mode.store(generatorMode.getSelectedId() - 1); };
+        setupSlider(generatorLevel, -90.0, 0.0, 0.1, -40.0, " dBFS");
+        generatorLevel.onValueChange = [this] { engine.testSettings.levelDb.store(generatorLevel.getValue()); };
+        setupSlider(generatorFrequency, 20.0, 20000.0, 1.0, 1000.0, " Hz");
+        generatorFrequency.setSkewFactorFromMidPoint(1000.0);
+        generatorFrequency.onValueChange = [this] { engine.testSettings.frequency.store(generatorFrequency.getValue()); };
+        generatorLevel.setTooltip("Global test-signal level (peak ceiling)");
+        generatorFrequency.setTooltip("Sine oscillator frequency");
+        addAndMakeVisible(generatorEnabled);
+        addAndMakeVisible(generatorMode);
+        addAndMakeVisible(generatorLevel);
+        addAndMakeVisible(generatorFrequency);
 
         title.setText("HT DSP", juce::dontSendNotification);
         title.setFont(juce::Font(juce::FontOptions(28.0f, juce::Font::bold)));
@@ -802,6 +846,30 @@ public:
         addAndMakeVisible(contentViewport);
         for (int ch = 0; ch < htdsp::channelCount; ++ch)
         {
+            strips[ch].onTestInputChange = [this](int channel, bool enabled)
+            {
+                strips[channel].setTestInput(engine.testInputs[channel].load());
+                if (!enabled || !engine.testSettings.enabled.load())
+                {
+                    engine.testInputs[channel].store(enabled);
+                    syncStrips();
+                    return;
+                }
+                const auto safe = juce::Component::SafePointer<MainComponent>(this);
+                juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::WarningIcon,
+                    "Test signal is running",
+                    "Proceed with caution. This replaces CH " + juce::String(channel + 1)
+                        + "'s input with the active test signal at the global generator level.",
+                    "Engage", "Cancel", this,
+                    juce::ModalCallbackFunction::create([safe, channel](int result)
+                    {
+                        if (safe != nullptr && result != 0)
+                        {
+                            safe->engine.testInputs[channel].store(true);
+                            safe->syncStrips();
+                        }
+                    }));
+            };
             strips[ch].onRouteChange = [this](int changed, bool outputChanged) { routeChanged(changed, outputChanged); };
             strips[ch].onNameChange = [this](int channel, juce::String name) { setName(channel, name); };
             strips[ch].onClipClear = [this](int channel, bool inputSignal)
@@ -892,6 +960,11 @@ public:
         auto footer = bounds.removeFromBottom(36);
         info.setBounds(footer);
         auto sidebar = bounds.removeFromLeft(315);
+        generatorEnabled.setBounds(sidebar.removeFromTop(30));
+        generatorMode.setBounds(sidebar.removeFromTop(32).reduced(2));
+        generatorLevel.setBounds(sidebar.removeFromTop(38));
+        generatorFrequency.setBounds(sidebar.removeFromTop(38));
+        sidebar.removeFromTop(12);
         deviceLabel.setBounds(sidebar.removeFromTop(28));
         deviceViewport.setBounds(sidebar.reduced(2));
         bounds.removeFromLeft(15);
@@ -915,6 +988,9 @@ private:
     juce::AudioDeviceSelectorComponent selector;
     juce::Viewport deviceViewport, contentViewport;
     StripArea strips;
+    juce::ToggleButton generatorEnabled;
+    juce::ComboBox generatorMode;
+    juce::Slider generatorLevel, generatorFrequency;
     juce::ComboBox channelSelect;
     juce::Label title, subtitle, info, deviceLabel, remoteInfo, startupStatus;
     juce::TextButton savePreset, loadPreset, chooseStartup;
@@ -1161,6 +1237,14 @@ private:
     }
     void syncStrips()
     {
+        generatorEnabled.setToggleState(engine.testSettings.enabled.load(), juce::dontSendNotification);
+        generatorMode.setSelectedId(engine.testSettings.mode.load() + 1, juce::dontSendNotification);
+        if (!generatorLevel.isMouseButtonDown())
+            generatorLevel.setValue(engine.testSettings.levelDb.load(), juce::dontSendNotification);
+        if (!generatorFrequency.isMouseButtonDown())
+            generatorFrequency.setValue(engine.testSettings.frequency.load(), juce::dontSendNotification);
+        generatorFrequency.setEnabled(engine.testSettings.mode.load() == 1);
+
         std::array<juce::String, htdsp::channelCount> currentNames;
         {
             std::lock_guard<std::mutex> guard(dataMutex);
@@ -1176,6 +1260,7 @@ private:
         const int selected = strips.selectedChannel();
         if (channelSelect.getSelectedId() != selected + 1)
             channelSelect.setSelectedId(selected + 1, juce::dontSendNotification);
+        strips[selected].setTestInput(engine.testInputs[selected].load());
         strips[selected].sync(currentNames[selected]);
     }
 
@@ -1280,6 +1365,15 @@ private:
     {
         auto root = std::make_unique<juce::DynamicObject>();
         root->setProperty("version", 1);
+        if (includeCurves)
+        {
+            auto test = std::make_unique<juce::DynamicObject>();
+            test->setProperty("enabled", engine.testSettings.enabled.load());
+            test->setProperty("mode", engine.testSettings.mode.load());
+            test->setProperty("frequency", engine.testSettings.frequency.load());
+            test->setProperty("levelDb", engine.testSettings.levelDb.load());
+            root->setProperty("generator", juce::var(test.release()));
+        }
         juce::Array<juce::var> channels, ins, outs;
         std::array<juce::String, htdsp::channelCount> safeNames;
         juce::String device;
@@ -1309,6 +1403,7 @@ private:
         {
             const auto& p = engine.parameters[static_cast<std::size_t>(i)];
             auto c = std::make_unique<juce::DynamicObject>();
+            if (includeCurves) c->setProperty("testInput", engine.testInputs[i].load());
             c->setProperty("name", safeNames[static_cast<std::size_t>(i)]);
             c->setProperty("inputRoute", p.inputRoute.load());
             c->setProperty("outputRoute", p.outputRoute.load());
@@ -1442,6 +1537,19 @@ private:
     void handleRemote(const juce::var& command)
     {
         if (command.hasProperty("channels")) { applySnapshot(command); return; }
+        if (command.getProperty("generator", false))
+        {
+            const auto key = command.getProperty("key", {}).toString();
+            const auto value = command.getProperty("value", {});
+            const double number = static_cast<double>(value);
+            if (!std::isfinite(number)) return;
+            if (key == "enabled") engine.testSettings.enabled.store(static_cast<bool>(value));
+            else if (key == "mode") engine.testSettings.mode.store(std::clamp(static_cast<int>(value), 0, 2));
+            else if (key == "frequency") engine.testSettings.frequency.store(std::clamp(number, 20.0, 20000.0));
+            else if (key == "levelDb") engine.testSettings.levelDb.store(std::clamp(number, -90.0, 0.0));
+            syncStrips();
+            return;
+        }
         const int ch = static_cast<int>(command.getProperty("channel", -1));
         if (ch < 0 || ch >= htdsp::channelCount) return;
         const auto key = command.getProperty("key", {}).toString();
@@ -1449,7 +1557,14 @@ private:
         const auto index = static_cast<std::size_t>(ch);
         auto& p = engine.parameters[index];
         const auto numerical = static_cast<double>(value);
-        if (key == "name") setName(ch, value.toString());
+        if (key == "testInput")
+        {
+            const bool enabled = static_cast<bool>(value);
+            if (enabled && engine.testSettings.enabled.load()
+                && !static_cast<bool>(command.getProperty("confirmed", false))) return;
+            engine.testInputs[index].store(enabled);
+        }
+        else if (key == "name") setName(ch, value.toString());
         else if (key == "levelDb") p.levelDb.store(std::clamp(numerical, -90.0, 18.0));
         else if (key == "delayMs") p.delayMs.store(std::clamp(numerical, 0.0, dualdsp::kMaxDelayMs));
         else if (key == "invertPolarity") p.invertPolarity.store(static_cast<bool>(value));
@@ -1489,7 +1604,7 @@ class HTDSPApp final : public juce::JUCEApplication
 {
 public:
     const juce::String getApplicationName() override { return "HT DSP"; }
-    const juce::String getApplicationVersion() override { return "0.1.0"; }
+    const juce::String getApplicationVersion() override { return "0.2.0"; }
     bool moreThanOneInstanceAllowed() override { return false; }
 
     void initialise(const juce::String&) override
