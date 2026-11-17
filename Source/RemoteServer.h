@@ -1,7 +1,7 @@
 #pragma once
 #include <JuceHeader.h>
 #include "RemotePage.h"
-#include <SimpleDSPResources.h>
+#include "ProjectSettings.h"
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -16,18 +16,19 @@ class RemoteServer final
 {
 public:
     using Snapshot = std::function<juce::String()>;
-    using Telemetry = std::function<juce::String()>;
+    using Telemetry = std::function<juce::String(int)>;
     using Change = std::function<void(const juce::var&)>;
     // Called by the server worker, returns true only AFTER the GUI persisted
     // and acknowledged the selected startup preset.
     using SelectStartup = std::function<bool(const juce::File&)>;
 
     bool start(const juce::String& address, int port, const juce::String& sixDigitPin,
-               bool pinRequired, juce::File presetDirectory, Snapshot getState,
+               bool pinRequired, juce::File presetDirectory, Snapshot getState, Snapshot getPreset,
                Telemetry getTelemetry, Change applyState, SelectStartup selectStartupPreset)
     {
         stop();
         state = std::move(getState);
+        preset = std::move(getPreset);
         telemetry = std::move(getTelemetry);
         change = std::move(applyState);
         selectStartup = std::move(selectStartupPreset);
@@ -103,31 +104,6 @@ private:
         }
     }
     static std::string utf8(juce::String s) { return s.toStdString(); }
-    // Resolve binary resources by their ORIGINAL filenames rather than relying
-    // on JUCE's generated C++ identifiers, which strip punctuation such as '-'.
-    // This keeps all icons embedded in the EXE and available to mobile clients.
-    static void sendPngAsset(juce::StreamingSocket& client, const char* filename)
-    {
-        for (int i = 0; i < SimpleDSPAssets::namedResourceListSize; ++i)
-        {
-            const juce::String original(SimpleDSPAssets::originalFilenames[i]);
-            if (! original.endsWithIgnoreCase(filename))
-                continue;
-
-            int byteCount = 0;
-            const char* data = SimpleDSPAssets::getNamedResource(
-                SimpleDSPAssets::namedResourceList[i], byteCount);
-            if (data != nullptr && byteCount > 0)
-            {
-                send(client, 200,
-                     std::string(data, static_cast<std::size_t>(byteCount)),
-                     "image/png");
-                return;
-            }
-        }
-        send(client, 404, jsonError("Icon resource not found"), "application/json");
-    }
-
     static std::string jsonError(const juce::String& err)
     {
         auto obj = std::make_unique<juce::DynamicObject>();
@@ -180,26 +156,10 @@ private:
         {
             send(client, 200, kRemotePage, "text/html; charset=utf-8"); return;
         }
-        if (method == "GET" && path == "/favicon-32.png")
-        {
-            sendPngAsset(client, "favicon-32.png"); return;
-        }
-        if (method == "GET" && path == "/apple-touch-icon.png")
-        {
-            sendPngAsset(client, "apple-touch-icon.png"); return;
-        }
-        if (method == "GET" && path == "/icon-192.png")
-        {
-            sendPngAsset(client, "icon-192.png"); return;
-        }
-        if (method == "GET" && path == "/icon-512.png")
-        {
-            sendPngAsset(client, "icon-512.png"); return;
-        }
         if (method == "GET" && path == "/manifest.webmanifest")
         {
             send(client, 200,
-                R"JSON({"name":"Simple DSP","short_name":"Simple DSP","start_url":"/","scope":"/","display":"standalone","background_color":"#111821","theme_color":"#111821","icons":[{"src":"/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any maskable"},{"src":"/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}]})JSON",
+                R"JSON({"name":"HT DSP","short_name":"HT DSP","start_url":"/","scope":"/","display":"standalone","background_color":"#111821","theme_color":"#111821"})JSON",
                 "application/manifest+json"); return;
         }
         bool authorised = !requiresPin.load();
@@ -212,9 +172,16 @@ private:
         {
             send(client, 200, utf8(state()), "application/json"); return;
         }
-        if (method == "GET" && path == "/api/telemetry")
+        if (method == "GET" && path.startsWith("/api/telemetry/"))
         {
-            send(client, 200, utf8(telemetry()), "application/json"); return;
+            const auto suffix = path.substring(15);
+            const int channel = suffix.getIntValue();
+            if (suffix.isEmpty() || !suffix.containsOnly("0123456789") || suffix.length() > 2
+                || channel < 0 || channel >= htdsp::channelCount)
+                send(client, 400, jsonError("Invalid channel"), "application/json");
+            else
+                send(client, 200, utf8(telemetry(channel)), "application/json");
+            return;
         }
         if (method == "GET" && path == "/api/presets")
         {
@@ -241,15 +208,15 @@ private:
         const auto file = presetFile(name);
         if (path == "/api/save")
         {
-            if (file.replaceWithText(state())) send(client, 200, "{\"ok\":true}", "application/json");
+            if (file.replaceWithText(preset())) send(client, 200, "{\"ok\":true}", "application/json");
             else send(client, 500, jsonError("Failed to save preset"), "application/json");
             return;
         }
         if (!file.existsAsFile()) { send(client, 404, jsonError("Preset not found"), "application/json"); return; }
-        if (file.getSize() > 100000) { send(client, 400, jsonError("Preset too large"), "application/json"); return; }
+        if (file.getSize() > htdsp::maxPresetBytes) { send(client, 400, jsonError("Preset too large"), "application/json"); return; }
         const auto loaded = juce::JSON::parse(file.loadFileAsString());
         const auto channels = loaded.getProperty("channels", {});
-        if (!loaded.isObject() || !channels.isArray() || channels.getArray()->size() != 2)
+        if (!htdsp::hasValidChannels(channels))
         { send(client, 400, jsonError("Corrupt preset"), "application/json"); return; }
         if (path == "/api/startup")
         {
@@ -268,7 +235,7 @@ private:
     std::unique_ptr<juce::StreamingSocket> listener;
     std::thread worker;
     std::atomic<bool> active { false };
-    Snapshot state;
+    Snapshot state, preset;
     Telemetry telemetry;
     Change change;
     SelectStartup selectStartup;

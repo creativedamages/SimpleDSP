@@ -14,6 +14,6 @@ ctest --test-dir build -C Release --output-on-failure
 if errorlevel 1 exit /b 1
 echo.
 echo Built executables:
-dir /s /b build\Simple DSP.exe
+dir /s /b build\HT DSP.exe
 echo.
 pause

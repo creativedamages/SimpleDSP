@@ -3,6 +3,8 @@
 #include "Analysis.h"
 #include "RemoteServer.h"
 #include <array>
+#include <bitset>
+#include "ProjectSettings.h"
 #include <functional>
 #include <future>
 #include <chrono>
@@ -13,7 +15,7 @@
 // Catch a future build that forgets the UTF-8 compiler setting. JUCE uses
 // UTF-8 for its narrow string literals in labels, menu items, and buttons.
 static_assert(sizeof("\u2022") == 4 && sizeof("▼") == 4,
-              "Simple DSP requires UTF-8 source and execution charsets (/utf-8 on MSVC).");
+              "HT DSP requires UTF-8 source and execution charsets (/utf-8 on MSVC).");
 
 namespace
 {
@@ -43,8 +45,14 @@ void setupSlider(juce::Slider& slider, double low, double high, double step,
 class AudioEngine final : public juce::AudioIODeviceCallback
 {
 public:
-    std::array<dualdsp::ChannelSettings, 2> parameters;
-    std::array<dualdsp::AudioTelemetry, 2> telemetry;
+    std::array<dualdsp::ChannelSettings, htdsp::channelCount> parameters;
+    std::array<dualdsp::AudioTelemetry, htdsp::channelCount> telemetry;
+
+    AudioEngine()
+    {
+        for (auto& route : callbackInputs) route.store(-1);
+        for (auto& route : callbackOutputs) route.store(-1);
+    }
 
     void audioDeviceAboutToStart(juce::AudioIODevice* device) override
     {
@@ -62,7 +70,7 @@ public:
     {
         const auto activeInputs = device != nullptr ? device->getActiveInputChannels() : juce::BigInteger{};
         const auto activeOutputs = device != nullptr ? device->getActiveOutputChannels() : juce::BigInteger{};
-        for (int path = 0; path < 2; ++path)
+        for (int path = 0; path < htdsp::channelCount; ++path)
         {
             const auto slot = static_cast<std::size_t>(path);
             callbackInputs[slot].store(callbackIndex(activeInputs, parameters[slot].inputRoute.load()),
@@ -88,12 +96,12 @@ public:
         juce::ScopedNoDenormals avoidDenormals;
 
         // Silence every open physical output first. This callback is the only writer.
-        // Nothing from the two paths is ever summed or mixed.
+        // Each physical output is assigned to at most one path.
         for (int output = 0; output < outputCount; ++output)
             if (outputData[output] != nullptr)
                 juce::FloatVectorOperations::clear(outputData[output], numSamples);
 
-        for (int path = 0; path < 2; ++path)
+        for (int path = 0; path < htdsp::channelCount; ++path)
         {
             const auto& params = parameters[static_cast<std::size_t>(path)];
             const int inputRoute = callbackInputs[static_cast<std::size_t>(path)].load(std::memory_order_acquire);
@@ -128,8 +136,8 @@ private:
         return index;
     }
 
-    std::array<dualdsp::MonoProcessor, 2> processors;
-    std::array<std::atomic<int>, 2> callbackInputs { -1, -1 }, callbackOutputs { -1, -1 };
+    std::array<dualdsp::MonoProcessor, htdsp::channelCount> processors;
+    std::array<std::atomic<int>, htdsp::channelCount> callbackInputs {}, callbackOutputs {};
 };
 
 class EqRow final : public juce::Component
@@ -638,28 +646,46 @@ private:
 class StripArea final : public juce::Component
 {
 public:
-    StripArea(dualdsp::ChannelSettings& a, dualdsp::ChannelSettings& b)
-        : left(1, a), right(2, b)
+    explicit StripArea(std::array<dualdsp::ChannelSettings, htdsp::channelCount>& settings)
     {
-        addAndMakeVisible(left);
-        addAndMakeVisible(right);
-        left.onLayoutChanged = [this] { refreshHeight(); };
-        right.onLayoutChanged = [this] { refreshHeight(); };
+        for (int i = 0; i < htdsp::channelCount; ++i)
+        {
+            channels[i] = std::make_unique<ChannelStrip>(i + 1, settings[i]);
+            addChildComponent(*channels[i]);
+            channels[i]->onLayoutChanged = [this, i]
+            {
+                if (selected == i) refreshHeight();
+            };
+        }
+        channels[selected]->setVisible(true);
         refreshHeight();
     }
 
+    void select(int index)
+    {
+        channels[selected]->setVisible(false);
+        selected = index;
+        channels[selected]->setVisible(true);
+        refreshHeight();
+        resized();
+    }
+
+    int selectedChannel() const noexcept { return selected; }
+    ChannelStrip& operator[](int index) noexcept { return *channels[index]; }
+
     void refreshHeight()
     {
-        setSize(1150, std::max(left.preferredHeight(), right.preferredHeight()));
+        setSize(juce::jmax(565, getWidth()), channels[selected]->preferredHeight());
     }
 
     void resized() override
     {
-        left.setBounds(0, 0, 565, getHeight());
-        right.setBounds(585, 0, 565, getHeight());
+        channels[selected]->setBounds(getLocalBounds());
     }
 
-    ChannelStrip left, right;
+private:
+    std::array<std::unique_ptr<ChannelStrip>, htdsp::channelCount> channels;
+    int selected = 0;
 };
 
 class MainComponent final : public juce::Component, private juce::Timer
@@ -667,18 +693,34 @@ class MainComponent final : public juce::Component, private juce::Timer
 public:
     MainComponent()
         : selector(deviceManager, 0, 64, 0, 64, false, false, false, true),
-          strips(engine.parameters[0], engine.parameters[1])
+          strips(engine.parameters)
     {
         for (auto& spectrum : publishedRta) spectrum.fill(-96.0f);
         for (auto& spectrum : publishedInputRta) spectrum.fill(-96.0f);
         appFolder().createDirectory();
         presetFolder().createDirectory();
         readPreferences();
+        for (int ch = 0; ch < htdsp::channelCount; ++ch)
+        {
+            names[ch] = "Channel " + juce::String(ch + 1);
+            lastValidInput[ch] = lastValidOutput[ch] = -1;
+            engine.parameters[ch].outputMuted.store(true);
+        }
+        channelSelect.setTitle("DSP channel");
+        channelSelect.onChange = [this]
+        {
+            const int selected = channelSelect.getSelectedId() - 1;
+            if (selected < 0 || selected >= htdsp::channelCount) return;
+            strips.select(selected);
+            contentViewport.setViewPosition(0, 0);
+            syncStrips();
+        };
+        addAndMakeVisible(channelSelect);
 
-        title.setText("Simple DSP", juce::dontSendNotification);
+        title.setText("HT DSP", juce::dontSendNotification);
         title.setFont(juce::Font(juce::FontOptions(28.0f, juce::Font::bold)));
         title.setColour(juce::Label::textColourId, juce::Colours::white);
-        subtitle.setText("Independent mono processing  -  no summing", juce::dontSendNotification);
+        subtitle.setText("16 independent mono channels", juce::dontSendNotification);
         subtitle.setColour(juce::Label::textColourId, mutedColour);
         deviceLabel.setText("AUDIO INTERFACE", juce::dontSendNotification);
         deviceLabel.setColour(juce::Label::textColourId, accentColour);
@@ -716,20 +758,8 @@ public:
         loadOnLaunch.setColour(juce::ToggleButton::tickColourId, accentColour);
         startWithWindows.setColour(juce::ToggleButton::tickColourId, accentColour);
        #if JUCE_WINDOWS
-        // Preserve and migrate any v0.2 autostart entry to the new app name.
-        if (juce::WindowsRegistry::valueExists(legacyRegistryRunKey()))
-        {
-            if (!juce::WindowsRegistry::valueExists(registryRunKey()))
-            {
-                const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getFullPathName();
-                if (juce::WindowsRegistry::setValue(registryRunKey(), "\"" + executable + "\""))
-                    juce::WindowsRegistry::deleteValue(legacyRegistryRunKey());
-            }
-            else juce::WindowsRegistry::deleteValue(legacyRegistryRunKey());
-        }
-        startWithWindows.setToggleState(juce::WindowsRegistry::valueExists(registryRunKey())
-                                   || juce::WindowsRegistry::valueExists(legacyRegistryRunKey()),
-                                   juce::dontSendNotification);
+        startWithWindows.setToggleState(juce::WindowsRegistry::valueExists(registryRunKey()),
+                                       juce::dontSendNotification);
        #else
         startWithWindows.setEnabled(false);
        #endif
@@ -769,32 +799,32 @@ public:
         contentViewport.setScrollBarsShown(true, true);
         addAndMakeVisible(deviceViewport);
         addAndMakeVisible(contentViewport);
-        strips.left.onRouteChange = [this](int changed, bool outputChanged) { routeChanged(changed, outputChanged); };
-        strips.right.onRouteChange = [this](int changed, bool outputChanged) { routeChanged(changed, outputChanged); };
-        strips.left.onNameChange = [this](int ch, juce::String n) { setName(ch, n); };
-        strips.right.onNameChange = [this](int ch, juce::String n) { setName(ch, n); };
-        const auto clearClip = [this](int ch, bool inputSignal)
+        for (int ch = 0; ch < htdsp::channelCount; ++ch)
         {
-            engine.telemetry[static_cast<std::size_t>(ch)].clearClip(inputSignal);
-        };
-        strips.left.onClipClear = clearClip;
-        strips.right.onClipClear = clearClip;
+            strips[ch].onRouteChange = [this](int changed, bool outputChanged) { routeChanged(changed, outputChanged); };
+            strips[ch].onNameChange = [this](int channel, juce::String name) { setName(channel, name); };
+            strips[ch].onClipClear = [this](int channel, bool inputSignal)
+            {
+                engine.telemetry[channel].clearClip(inputSignal);
+            };
+        }
 
         auto savedDevice = juce::XmlDocument::parse(deviceStateFile());
         const auto error = deviceManager.initialise(2, 2, savedDevice.get(), true);
         if (error.isNotEmpty()) info.setText("Audio device: " + error, juce::dontSendNotification);
         updateDeviceRouting(true);
+        if (launchPreset && startupFile.isNotEmpty()) loadPresetFromFile(juce::File(startupFile), true);
         deviceManager.addAudioCallback(&engine);
-        if (launchPreset && startupFile.isNotEmpty()) loadPresetFromFile(juce::File(startupFile), false);
         syncStrips();
 
         remoteAddress = RemoteServer::getPrivateIPv4();
         if (remoteAddress.isNotEmpty())
         {
             const auto safe = juce::Component::SafePointer<MainComponent>(this);
-            const bool started = remote.start(remoteAddress, 8765, remotePin, pinRequired, presetFolder(),
+            const bool started = remote.start(remoteAddress, htdsp::remotePort, remotePin, pinRequired, presetFolder(),
                 [this] { return getStateJson(); },
-                [this] { return getTelemetryJson(); },
+                [this] { return getPresetJson(); },
+                [this](int channel) { return getTelemetryJson(channel); },
                 [safe](const juce::var& command)
                 {
                     juce::MessageManager::callAsync([safe, command]
@@ -821,14 +851,14 @@ public:
             if (!started)
             {
                 remoteAddress.clear();
-                remoteInfo.setText("Remote unavailable: TCP port 8765 already in use", juce::dontSendNotification);
+                remoteInfo.setText("Remote unavailable: TCP port " + juce::String(htdsp::remotePort) + " already in use", juce::dontSendNotification);
             }
             else updateRemoteLabel();
         }
         else remoteInfo.setText("Remote unavailable: no private IPv4 interface found", juce::dontSendNotification);
 
         startTimerHz(12);
-        setSize(1560, 925);
+        setSize(1120, 875);
     }
 
     ~MainComponent() override
@@ -864,28 +894,33 @@ public:
         deviceLabel.setBounds(sidebar.removeFromTop(28));
         deviceViewport.setBounds(sidebar.reduced(2));
         bounds.removeFromLeft(15);
+        auto channelRow = bounds.removeFromTop(30);
+        channelSelect.setBounds(channelRow.removeFromLeft(330));
+        bounds.removeFromTop(8);
         contentViewport.setBounds(bounds);
+        strips.setSize(juce::jmax(565, contentViewport.getMaximumVisibleWidth()), strips.getHeight());
     }
 
 private:
     juce::AudioDeviceManager deviceManager;
     AudioEngine engine;
-    std::array<dualdsp::SpectrumAnalyzer, 2> inputSpectrumAnalyzers;
-    std::array<dualdsp::SpectrumAnalyzer, 2> outputSpectrumAnalyzers;
-    std::array<dualdsp::LiveLevels, 2> displayLevels;
+    std::array<dualdsp::SpectrumAnalyzer, htdsp::channelCount> inputSpectrumAnalyzers;
+    std::array<dualdsp::SpectrumAnalyzer, htdsp::channelCount> outputSpectrumAnalyzers;
+    std::array<dualdsp::LiveLevels, htdsp::channelCount> displayLevels;
     mutable std::mutex liveMutex;
-    std::array<dualdsp::LiveLevels, 2> publishedLevels;
-    std::array<std::array<float, dualdsp::kRtaBins>, 2> publishedRta {};
-    std::array<std::array<float, dualdsp::kRtaBins>, 2> publishedInputRta {};
+    std::array<dualdsp::LiveLevels, htdsp::channelCount> publishedLevels;
+    std::array<std::array<float, dualdsp::kRtaBins>, htdsp::channelCount> publishedRta {};
+    std::array<std::array<float, dualdsp::kRtaBins>, htdsp::channelCount> publishedInputRta {};
     juce::AudioDeviceSelectorComponent selector;
     juce::Viewport deviceViewport, contentViewport;
     StripArea strips;
+    juce::ComboBox channelSelect;
     juce::Label title, subtitle, info, deviceLabel, remoteInfo, startupStatus;
     juce::TextButton savePreset, loadPreset, chooseStartup;
     juce::ToggleButton loadOnLaunch, startWithWindows, pinRequiredToggle;
     std::unique_ptr<juce::FileChooser> chooser;
     RemoteServer remote;
-    std::array<juce::String, 2> names { "Channel 1", "Channel 2" };
+    std::array<juce::String, htdsp::channelCount> names;
     mutable std::mutex dataMutex;
     juce::StringArray publishedInputs, publishedOutputs;
     juce::String publishedDevice = "No audio device";
@@ -900,24 +935,22 @@ private:
     bool pinRequired = true;
     juce::String lastDeviceIdentity;
     juce::StringArray lastInputs, lastOutputs;
-    std::array<int, 2> lastValidInput { -1, -1 }, lastValidOutput { -1, -1 };
+    std::array<int, htdsp::channelCount> lastValidInput, lastValidOutput;
     bool suppressUpdates = false;
+    mutable std::atomic<unsigned int> requestedSpectra { 0 };
+    int nextRemoteSpectrum = 0;
 
     static juce::File appFolder()
     {
         return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-            .getChildFile("RobbyApps").getChildFile("DualChannelDSP");
+            .getChildFile("RobbyApps").getChildFile("HTDSP");
     }
     static juce::File presetFolder() { return appFolder().getChildFile("Presets"); }
     static juce::File preferenceFile() { return appFolder().getChildFile("settings.json"); }
     static juce::File deviceStateFile() { return appFolder().getChildFile("audio-device.xml"); }
     static juce::String registryRunKey()
     {
-        return R"(HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run\SimpleDSP)";
-    }
-    static juce::String legacyRegistryRunKey()
-    {
-        return R"(HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run\DualChannelDSP)";
+        return R"(HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run\HTDSP)";
     }
     void readPreferences()
     {
@@ -968,16 +1001,16 @@ private:
     }
     void updateRemoteLabel()
     {
-        remoteInfo.setText("PHONE: http://" + remoteAddress + ":8765  |  "
+        remoteInfo.setText("PHONE: http://" + remoteAddress + ":" + juce::String(htdsp::remotePort) + "  |  "
                            + (pinRequired ? "PIN required: " + remotePin : "PIN off (trusted Wi-Fi only)"),
                            juce::dontSendNotification);
     }
     bool setStartupFromRemote(const juce::File& file)
     {
-        if (!file.existsAsFile() || file.getSize() > 100000) return false;
+        if (!file.existsAsFile() || file.getSize() > htdsp::maxPresetBytes) return false;
         const auto parsed = juce::JSON::parse(file.loadFileAsString());
         const auto v = parsed.getProperty("channels", {});
-        if (!parsed.isObject() || !v.isArray() || v.getArray()->size() != 2) return false;
+        if (!htdsp::hasValidChannels(v)) return false;
         const auto previousFile = startupFile;
         const auto previousLoad = launchPreset;
         startupFile = file.getFullPathName();
@@ -1002,17 +1035,10 @@ private:
         {
             const auto exe = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getFullPathName();
             ok = juce::WindowsRegistry::setValue(registryRunKey(), "\"" + exe + "\"");
-            if (ok && juce::WindowsRegistry::valueExists(legacyRegistryRunKey()))
-                juce::WindowsRegistry::deleteValue(legacyRegistryRunKey());
         }
         else
-        {
-            const bool currentOk = !juce::WindowsRegistry::valueExists(registryRunKey())
+            ok = !juce::WindowsRegistry::valueExists(registryRunKey())
                 || juce::WindowsRegistry::deleteValue(registryRunKey());
-            const bool oldOk = !juce::WindowsRegistry::valueExists(legacyRegistryRunKey())
-                || juce::WindowsRegistry::deleteValue(legacyRegistryRunKey());
-            ok = currentOk && oldOk;
-        }
         if (!ok)
         {
             startWithWindows.setToggleState(!startWithWindows.getToggleState(), juce::dontSendNotification);
@@ -1032,7 +1058,7 @@ private:
                 auto file = fc.getResult();
                 if (! file.getFileName().endsWithIgnoreCase(".dsp.json"))
                     file = file.getSiblingFile(file.getFileName() + ".dsp.json");
-                if (file.replaceWithText(safe->getStateJson()))
+                if (file.replaceWithText(safe->getPresetJson()))
                     safe->info.setText("Preset saved: " + file.getFileName(), juce::dontSendNotification);
                 else safe->info.setText("Could not save preset.", juce::dontSendNotification);
             });
@@ -1057,7 +1083,7 @@ private:
     }
     bool loadPresetFromFile(const juce::File& file, bool notify)
     {
-        if (!file.existsAsFile() || file.getSize() > 100000)
+        if (!file.existsAsFile() || file.getSize() > htdsp::maxPresetBytes)
         {
             if (notify) info.setText("Preset not found or too large.", juce::dontSendNotification);
             return false;
@@ -1075,55 +1101,81 @@ private:
     void timerCallback() override
     {
         updateDeviceRouting(false);
+        const int selected = strips.selectedChannel();
         if (auto* device = deviceManager.getCurrentAudioDevice())
-        {
             graphSampleRate.store(device->getCurrentSampleRate());
-            strips.left.setGraphSampleRate(device->getCurrentSampleRate());
-            strips.right.setGraphSampleRate(device->getCurrentSampleRate());
-            // Keep the footer informative without overwriting reported errors constantly.
-        }
+        const auto rate = graphSampleRate.load();
+        strips[selected].setGraphSampleRate(rate);
 
-        // Only the GUI timer performs FFT analysis, keeping the audio callback
-        // free of transforms, allocations, socket operations and locks.
-        const auto sr = graphSampleRate.load();
-        for (int ch = 0; ch < 2; ++ch)
+        // Meter every channel. Run FFTs for the visible strip and up to
+        // two remote-requested channels per tick, with fair scheduling.
+        auto requests = requestedSpectra.exchange(0) & ~(1u << selected);
+        std::bitset<htdsp::channelCount> analyze;
+        analyze.set(selected);
+        int remoteBudget = 2;
+        for (int offset = 0; offset < htdsp::channelCount && remoteBudget > 0; ++offset)
         {
-            const auto i = static_cast<std::size_t>(ch);
-            inputSpectrumAnalyzers[i].update(engine.telemetry[i], sr, true);
-            outputSpectrumAnalyzers[i].update(engine.telemetry[i], sr, false);
-            auto levels = engine.telemetry[i].takeLevels();
-            // GUI peak falloff: hold transients briefly, then decay about 18 dB/s.
-            levels.inputPeak = std::max(levels.inputPeak, displayLevels[i].inputPeak - 1.5f);
-            levels.outputPeak = std::max(levels.outputPeak, displayLevels[i].outputPeak - 1.5f);
-            displayLevels[i] = levels;
-            const auto& inputRta = inputSpectrumAnalyzers[i].getBins();
-            const auto& outputRta = outputSpectrumAnalyzers[i].getBins();
-            if (ch == 0) strips.left.setTelemetry(levels, inputRta, outputRta);
-            else strips.right.setTelemetry(levels, inputRta, outputRta);
+            const int channel = (nextRemoteSpectrum + offset) % htdsp::channelCount;
+            if ((requests & (1u << channel)) == 0) continue;
+            analyze.set(channel);
+            requests &= ~(1u << channel);
+            --remoteBudget;
+        }
+        nextRemoteSpectrum = (nextRemoteSpectrum + 2) % htdsp::channelCount;
+        if (requests != 0) requestedSpectra.fetch_or(requests);
+
+        for (int ch = 0; ch < htdsp::channelCount; ++ch)
+        {
+            auto levels = engine.telemetry[ch].takeLevels();
+            levels.inputPeak = std::max(levels.inputPeak, displayLevels[ch].inputPeak - 1.5f);
+            levels.outputPeak = std::max(levels.outputPeak, displayLevels[ch].outputPeak - 1.5f);
+            displayLevels[ch] = levels;
+
+            if (analyze.test(ch))
             {
-                std::lock_guard<std::mutex> guard(liveMutex);
-                publishedLevels[i] = levels;
-                publishedInputRta[i] = inputRta;
-                publishedRta[i] = outputRta;
+                inputSpectrumAnalyzers[ch].update(engine.telemetry[ch], rate, true);
+                outputSpectrumAnalyzers[ch].update(engine.telemetry[ch], rate, false);
             }
         }
+
+        {
+            std::lock_guard<std::mutex> guard(liveMutex);
+            publishedLevels = displayLevels;
+            for (int ch = 0; ch < htdsp::channelCount; ++ch)
+            {
+                if (!analyze.test(ch)) continue;
+                publishedInputRta[ch] = inputSpectrumAnalyzers[ch].getBins();
+                publishedRta[ch] = outputSpectrumAnalyzers[ch].getBins();
+            }
+        }
+        strips[selected].setTelemetry(displayLevels[selected], inputSpectrumAnalyzers[selected].getBins(),
+                                      outputSpectrumAnalyzers[selected].getBins());
         syncStrips();
     }
     void setName(int ch, juce::String n)
     {
-        if (ch < 0 || ch >= 2) return;
+        if (ch < 0 || ch >= htdsp::channelCount) return;
         std::lock_guard<std::mutex> guard(dataMutex);
         names[static_cast<std::size_t>(ch)] = n.substring(0, 40);
     }
     void syncStrips()
     {
-        juce::String n0, n1;
+        std::array<juce::String, htdsp::channelCount> currentNames;
         {
             std::lock_guard<std::mutex> guard(dataMutex);
-            n0 = names[0]; n1 = names[1];
+            currentNames = names;
         }
-        strips.left.sync(n0);
-        strips.right.sync(n1);
+        for (int ch = 0; ch < htdsp::channelCount; ++ch)
+        {
+            const auto label = "CH " + juce::String(ch + 1) + "  -  " + currentNames[ch];
+            if (channelSelect.getItemText(ch) == label) continue;
+            if (channelSelect.getNumItems() <= ch) channelSelect.addItem(label, ch + 1);
+            else channelSelect.changeItemText(ch + 1, label);
+        }
+        const int selected = strips.selectedChannel();
+        if (channelSelect.getSelectedId() != selected + 1)
+            channelSelect.setSelectedId(selected + 1, juce::dontSendNotification);
+        strips[selected].sync(currentNames[selected]);
     }
 
     void saveAudioDeviceState() const
@@ -1146,8 +1198,8 @@ private:
             if (force || lastDeviceIdentity.isNotEmpty())
             {
                 lastDeviceIdentity.clear(); lastInputs.clear(); lastOutputs.clear();
-                strips.left.setRouteOptions({}, {}, -1, -1);
-                strips.right.setRouteOptions({}, {}, -1, -1);
+                for (int ch = 0; ch < htdsp::channelCount; ++ch)
+                    strips[ch].setRouteOptions({}, {}, -1, -1);
                 publishRoutes(); publishDeviceInfo();
             }
             return;
@@ -1162,25 +1214,24 @@ private:
             lastDeviceIdentity = identity;
             lastInputs = in; lastOutputs = out;
             const auto valid = [](int route, int count) { return route >= 0 && route < count ? route : -1; };
-            const int input1 = changedInterface ? (in.size() > 0 ? 0 : -1) : valid(lastValidInput[0], in.size());
-            const int input2 = changedInterface ? (in.size() > 1 ? 1 : -1) : valid(lastValidInput[1], in.size());
-            const int output1 = changedInterface ? (out.size() > 0 ? 0 : -1) : valid(lastValidOutput[0], out.size());
-            const int output2 = changedInterface ? (out.size() > 1 ? 1 : -1) : valid(lastValidOutput[1], out.size());
-            strips.left.setRouteOptions(in, out, input1, output1);
-            strips.right.setRouteOptions(in, out, input2, output2);
+            for (int ch = 0; ch < htdsp::channelCount; ++ch)
+            {
+                const auto input = valid(changedInterface ? ch : lastValidInput[ch], in.size());
+                const auto output = valid(changedInterface ? ch : lastValidOutput[ch], out.size());
+                strips[ch].setRouteOptions(in, out, input, output);
+            }
             suppressUpdates = false;
             publishRoutes(); publishDeviceInfo(); applyActivePorts();
         }
         else applyActivePorts();
     }
-    void routeChanged(int changedIndex, bool)
+    void routeChanged(int changedIndex, bool outputChanged)
     {
         if (suppressUpdates) return;
-        const auto newOutputs = std::array<int, 2>{ strips.left.getOutputRoute(), strips.right.getOutputRoute() };
-        if (newOutputs[0] >= 0 && newOutputs[0] == newOutputs[1])
+        const auto output = strips[changedIndex].getOutputRoute();
+        if (outputChanged && htdsp::outputIsAssigned(lastValidOutput, changedIndex, output))
         {
-            auto& changedStrip = changedIndex == 0 ? strips.left : strips.right;
-            changedStrip.setOutputRoute(lastValidOutput[static_cast<std::size_t>(changedIndex)]);
+            strips[changedIndex].setOutputRoute(lastValidOutput[changedIndex]);
             info.setText("Output conflict: each channel requires a different physical output.", juce::dontSendNotification);
             return;
         }
@@ -1188,13 +1239,17 @@ private:
     }
     void publishRoutes()
     {
-        lastValidInput = { strips.left.getInputRoute(), strips.right.getInputRoute() };
-        lastValidOutput = { strips.left.getOutputRoute(), strips.right.getOutputRoute() };
-        for (int i = 0; i < 2; ++i)
+        for (int ch = 0; ch < htdsp::channelCount; ++ch)
         {
-            engine.parameters[static_cast<std::size_t>(i)].inputRoute.store(lastValidInput[static_cast<std::size_t>(i)]);
-            engine.parameters[static_cast<std::size_t>(i)].outputRoute.store(lastValidOutput[static_cast<std::size_t>(i)]);
+            lastValidInput[ch] = strips[ch].getInputRoute();
+            lastValidOutput[ch] = strips[ch].getOutputRoute();
+            engine.parameters[ch].inputRoute.store(lastValidInput[ch]);
+            engine.parameters[ch].outputRoute.store(lastValidOutput[ch]);
         }
+    }
+    void refreshOpenRoutes()
+    {
+        const juce::ScopedLock lock(deviceManager.getAudioCallbackLock());
         engine.refreshRoutes(deviceManager.getCurrentAudioDevice());
     }
     void applyActivePorts()
@@ -1207,7 +1262,7 @@ private:
         if (!setup.useDefaultInputChannels && !setup.useDefaultOutputChannels
             && setup.inputChannels == inputs && setup.outputChannels == outputs)
         {
-            engine.refreshRoutes(deviceManager.getCurrentAudioDevice());
+            refreshOpenRoutes();
             return;
         }
         setup.useDefaultInputChannels = false;
@@ -1217,15 +1272,15 @@ private:
         const auto error = deviceManager.setAudioDeviceSetup(setup, true);
         if (error.isNotEmpty()) info.setText("Audio routing error: " + error, juce::dontSendNotification);
         else saveAudioDeviceState();
-        engine.refreshRoutes(deviceManager.getCurrentAudioDevice());
+        refreshOpenRoutes();
     }
 
-    juce::var snapshot() const
+    juce::var snapshot(bool includeCurves) const
     {
         auto root = std::make_unique<juce::DynamicObject>();
-        root->setProperty("version", 2);
+        root->setProperty("version", 1);
         juce::Array<juce::var> channels, ins, outs;
-        std::array<juce::String, 2> safeNames;
+        std::array<juce::String, htdsp::channelCount> safeNames;
         juce::String device;
         {
             std::lock_guard<std::mutex> guard(dataMutex);
@@ -1249,7 +1304,7 @@ private:
         root->setProperty("inputs", juce::var(ins));
         root->setProperty("outputs", juce::var(outs));
         const auto sr = graphSampleRate.load();
-        for (int i = 0; i < 2; ++i)
+        for (int i = 0; i < htdsp::channelCount; ++i)
         {
             const auto& p = engine.parameters[static_cast<std::size_t>(i)];
             auto c = std::make_unique<juce::DynamicObject>();
@@ -1280,64 +1335,59 @@ private:
             };
             c->setProperty("highPass", cutoff(p.highPass));
             c->setProperty("lowPass", cutoff(p.lowPass));
-            for (int n = 0; n < 128; ++n)
-                curve.add(dualdsp::responseDb(p, sr, 20.0 * std::pow(1000.0, n / 127.0)));
-            c->setProperty("curve", juce::var(curve));
+            if (includeCurves)
+            {
+                for (int n = 0; n < 128; ++n)
+                    curve.add(dualdsp::responseDb(p, sr, 20.0 * std::pow(1000.0, n / 127.0)));
+                c->setProperty("curve", juce::var(curve));
+            }
             channels.add(juce::var(c.release()));
         }
         root->setProperty("channels", juce::var(channels));
         return juce::var(root.release());
     }
 
-    // Live data is intentionally excluded from preset JSON. Served separately
-    // so a phone can poll meters and both RTAs at up to 10 Hz without rebuilding controls.
-    juce::String getTelemetryJson() const
+    juce::String getTelemetryJson(int channel) const
     {
-        std::array<dualdsp::LiveLevels, 2> levels;
-        std::array<std::array<float, dualdsp::kRtaBins>, 2> spectra;
-        std::array<std::array<float, dualdsp::kRtaBins>, 2> inputSpectra;
+        requestedSpectra.fetch_or(1u << channel);
+        dualdsp::LiveLevels levels;
+        std::array<float, dualdsp::kRtaBins> output, input;
         {
             std::lock_guard<std::mutex> guard(liveMutex);
-            levels = publishedLevels;
-            spectra = publishedRta;
-            inputSpectra = publishedInputRta;
-        }
-        juce::Array<juce::var> channels;
-        for (int ch = 0; ch < 2; ++ch)
-        {
-            const auto i = static_cast<std::size_t>(ch);
-            auto obj = std::make_unique<juce::DynamicObject>();
-            obj->setProperty("inputPeak", levels[i].inputPeak);
-            obj->setProperty("inputRms", levels[i].inputRms);
-            obj->setProperty("outputPeak", levels[i].outputPeak);
-            obj->setProperty("outputRms", levels[i].outputRms);
-            obj->setProperty("inputClip", levels[i].inputClip);
-            obj->setProperty("outputClip", levels[i].outputClip);
-            juce::Array<juce::var> spectrum;
-            for (const auto value : spectra[i]) spectrum.add(value);
-            obj->setProperty("rta", juce::var(spectrum));
-            juce::Array<juce::var> inputSpectrum;
-            for (const auto value : inputSpectra[i]) inputSpectrum.add(value);
-            obj->setProperty("inputRta", juce::var(inputSpectrum));
-            channels.add(juce::var(obj.release()));
+            levels = publishedLevels[channel];
+            output = publishedRta[channel];
+            input = publishedInputRta[channel];
         }
         auto obj = std::make_unique<juce::DynamicObject>();
-        obj->setProperty("channels", juce::var(channels));
-        return juce::JSON::toString(juce::var(obj.release()));
+        obj->setProperty("channel", channel);
+        obj->setProperty("inputPeak", levels.inputPeak);
+        obj->setProperty("inputRms", levels.inputRms);
+        obj->setProperty("outputPeak", levels.outputPeak);
+        obj->setProperty("outputRms", levels.outputRms);
+        obj->setProperty("inputClip", levels.inputClip);
+        obj->setProperty("outputClip", levels.outputClip);
+        juce::Array<juce::var> spectrum, inputSpectrum;
+        for (auto value : output) spectrum.add(value);
+        for (auto value : input) inputSpectrum.add(value);
+        obj->setProperty("rta", juce::var(spectrum));
+        obj->setProperty("inputRta", juce::var(inputSpectrum));
+        return juce::JSON::toString(juce::var(obj.release()), true);
     }
 
-    juce::String getStateJson() const { return juce::JSON::toString(snapshot()); }
+    juce::String getStateJson() const { return juce::JSON::toString(snapshot(true), true); }
+    juce::String getPresetJson() const { return juce::JSON::toString(snapshot(false), true); }
 
     bool applySnapshot(const juce::var& state)
     {
         const auto v = state.getProperty("channels", {});
-        if (!v.isArray() || v.getArray()->size() != 2) return false;
-        std::array<int, 2> pendingInput { -1,-1 }, pendingOutput { -1,-1 };
+        if (!htdsp::hasValidChannels(v)) return false;
+        std::array<int, htdsp::channelCount> pendingInput, pendingOutput;
+        pendingInput.fill(-1);
+        pendingOutput.fill(-1);
         const bool matchingDevice = state.getProperty("device", {}).toString() == lastDeviceIdentity;
-        for (int ch = 0; ch < 2; ++ch)
+        for (int ch = 0; ch < htdsp::channelCount; ++ch)
         {
             const auto c = v[ch];
-            if (!c.isObject()) return false;
             const auto idx = static_cast<std::size_t>(ch);
             auto& p = engine.parameters[idx];
             setName(ch, c.getProperty("name", juce::String("Channel ") + juce::String(ch+1)).toString());
@@ -1372,13 +1422,16 @@ private:
                 const int rIn = static_cast<int>(c.getProperty("inputRoute", -1));
                 const int rOut = static_cast<int>(c.getProperty("outputRoute", -1));
                 pendingInput[idx] = rIn >= 0 && rIn < lastInputs.size() ? rIn : -1;
-                pendingOutput[idx] = rOut >= 0 && rOut < lastOutputs.size() ? rOut : -1;
+                pendingOutput[idx] = rOut >= 0 && rOut < lastOutputs.size()
+                    && !htdsp::outputIsAssigned(pendingOutput, ch, rOut) ? rOut : -1;
             }
         }
-        if (pendingOutput[0] >= 0 && pendingOutput[0] == pendingOutput[1]) pendingOutput[1] = -1;
         suppressUpdates = true;
-        strips.left.setInputRoute(pendingInput[0]); strips.right.setInputRoute(pendingInput[1]);
-        strips.left.setOutputRoute(pendingOutput[0]); strips.right.setOutputRoute(pendingOutput[1]);
+        for (int ch = 0; ch < htdsp::channelCount; ++ch)
+        {
+            strips[ch].setInputRoute(pendingInput[ch]);
+            strips[ch].setOutputRoute(pendingOutput[ch]);
+        }
         suppressUpdates = false;
         publishRoutes(); applyActivePorts(); syncStrips();
         if (!matchingDevice)
@@ -1389,7 +1442,7 @@ private:
     {
         if (command.hasProperty("channels")) { applySnapshot(command); return; }
         const int ch = static_cast<int>(command.getProperty("channel", -1));
-        if (ch < 0 || ch > 1) return;
+        if (ch < 0 || ch >= htdsp::channelCount) return;
         const auto key = command.getProperty("key", {}).toString();
         const auto value = command.getProperty("value", {});
         const auto index = static_cast<std::size_t>(ch);
@@ -1407,7 +1460,7 @@ private:
             const int route = static_cast<int>(value);
             const bool isOut = key == "outputRoute";
             if (route < -1 || route >= (isOut ? lastOutputs.size() : lastInputs.size())) return;
-            auto& strip = ch == 0 ? strips.left : strips.right;
+            auto& strip = strips[ch];
             if (isOut) strip.setOutputRoute(route); else strip.setInputRoute(route);
             routeChanged(ch, isOut);
         }
@@ -1431,11 +1484,11 @@ private:
     }
 };
 
-class SimpleDSPApp final : public juce::JUCEApplication
+class HTDSPApp final : public juce::JUCEApplication
 {
 public:
-    const juce::String getApplicationName() override { return "Simple DSP"; }
-    const juce::String getApplicationVersion() override { return "0.4.0"; }
+    const juce::String getApplicationName() override { return "HT DSP"; }
+    const juce::String getApplicationVersion() override { return "0.1.0"; }
     bool moreThanOneInstanceAllowed() override { return false; }
 
     void initialise(const juce::String&) override
@@ -1465,14 +1518,14 @@ private:
     {
     public:
         MainWindow()
-            : juce::DocumentWindow("Simple DSP", backgroundColour,
+            : juce::DocumentWindow("HT DSP", backgroundColour,
                                    juce::DocumentWindow::allButtons)
         {
             setUsingNativeTitleBar(true);
             setContentOwned(new MainComponent(), true);
             setResizable(true, true);
             setResizeLimits(980, 650, 2400, 1400);
-            centreWithSize(1560, 905);
+            centreWithSize(1120, 875);
             setVisible(true);
         }
         void closeButtonPressed() override
@@ -1485,4 +1538,4 @@ private:
 };
 } // namespace
 
-START_JUCE_APPLICATION(SimpleDSPApp)
+START_JUCE_APPLICATION(HTDSPApp)
