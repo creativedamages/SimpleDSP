@@ -1,5 +1,6 @@
 #include "../Source/DSP.h"
 #include "../Source/TestSignal.h"
+#include "../Source/SineSweep.h"
 #include "../Source/ProjectSettings.h"
 #include <cassert>
 #include <cmath>
@@ -57,6 +58,40 @@ int main()
         noisePower += value * value;
     }
     assert(noisePower > 0.01);
+
+    htdsp::SineSweep sweep;
+    sweep.start(48000, -20);
+    int sweepSamples = 0, earlyCrossings = 0, lateCrossings = 0;
+    float priorSweep = 0;
+    while (sweep.running())
+    {
+        const float value = sweep.next();
+        assert(std::isfinite(value) && std::abs(value) <= 0.10001f);
+        if (value != 0) assert(sweep.outputGain(false) == 0);
+        if (sweepSamples < 28800) assert(value == 0);
+        if (priorSweep <= 0 && value > 0)
+        {
+            if (sweepSamples >= 28800 && sweepSamples < 76800) ++earlyCrossings;
+            if (sweepSamples >= 460800 && sweepSamples < 508800) ++lateCrossings;
+        }
+        priorSweep = value;
+        ++sweepSamples;
+    }
+    assert(sweepSamples == 537600);
+    assert(earlyCrossings > 20 && earlyCrossings < 40);
+    assert(lateCrossings > 10000);
+    assert(sweep.outputGain(true) == 0 && sweep.outputGain(false) == 0);
+    sweep.start(48000, -40);
+    for (int n = 0; n < 100000; ++n) sweep.next();
+    sweep.stop();
+    int tailSamples = 0;
+    while (sweep.running())
+    {
+        assert(sweep.next() == 0);
+        assert(sweep.outputGain(false) == 0);
+        ++tailSamples;
+    }
+    assert(tailSamples == 28800);
     using namespace dualdsp;
     ChannelSettings settings;
     MonoProcessor processor;

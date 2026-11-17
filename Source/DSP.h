@@ -211,7 +211,7 @@ public:
     }
 
     // Called once per audio buffer. No allocations in the processing callback.
-    void beginBlock (const ChannelSettings& settings) noexcept
+    void beginBlock (const ChannelSettings& settings, bool forceUnmute = false) noexcept
     {
         for (int i = 0; i < kBands; ++i)
         {
@@ -251,7 +251,7 @@ public:
         }
         gainRamp.setTarget(dbToGain(settings.levelDb.load(std::memory_order_relaxed)));
         polarityRamp.setTarget(settings.invertPolarity.load(std::memory_order_relaxed) ? -1.0 : 1.0);
-        muteRamp.setTarget(settings.outputMuted.load(std::memory_order_relaxed) ? 0.0 : 1.0);
+        muteRamp.setTarget(!forceUnmute && settings.outputMuted.load(std::memory_order_relaxed) ? 0.0 : 1.0);
         delayRamp.setTarget(std::clamp(settings.delayMs.load(std::memory_order_relaxed), 0.0, kMaxDelayMs)
                             * sampleRate / 1000.0);
     }

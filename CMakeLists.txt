@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(HTDSP VERSION 0.2.0 LANGUAGES C CXX)
+project(HTDSP VERSION 0.3.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -25,7 +25,7 @@ if(MSVC)
   target_compile_options(HTDSP PRIVATE /utf-8)
 endif()
 
-target_sources(HTDSP PRIVATE Source/Main.cpp Source/DSP.h Source/Analysis.h Source/RemoteServer.h Source/RemotePage.h Source/ProjectSettings.h Source/TestSignal.h)
+target_sources(HTDSP PRIVATE Source/Main.cpp Source/DSP.h Source/Analysis.h Source/RemoteServer.h Source/RemotePage.h Source/ProjectSettings.h Source/TestSignal.h Source/SineSweep.h)
 target_compile_definitions(HTDSP PRIVATE
   JUCE_ASIO=1
   JUCE_WASAPI=1

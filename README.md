@@ -20,3 +20,8 @@ The global generator offers pink noise, an adjustable 20 Hz–20 kHz sine oscill
 Each channel's Use test signal checkbox replaces its physical input before EQ, filters, delay, level and mute. Selected channels receive the same signal. When the generator is off, selected channels receive silence. Unchecking restores the physical input. Engaging a channel while the generator is on asks for confirmation on Windows and the phone.
 
 Generator controls and channel assignments are session-only and start off when the app launches. Presets retain the existing DSP settings. Frequency is limited below Nyquist when the audio device uses a low sample rate.
+
+
+## Sine sweep
+
+Each channel has a Sine sweep button. Confirmation starts a 10-second logarithmic sweep from 20 Hz to 20 kHz, limited below Nyquist at lower sample rates, using the global generator level. The selected channel is temporarily unmuted and receives the sweep before its DSP. All other outputs are temporarily muted. Original channel mute settings are preserved and automatically resume after completion or Stop sweep. A brief settling interval before and after the sweep clears the maximum 500 ms DSP delay. Only one sweep can run at a time. The global generator enable switch is independent of the sweep button.

@@ -6,6 +6,7 @@
 #include <bitset>
 #include "ProjectSettings.h"
 #include "TestSignal.h"
+#include "SineSweep.h"
 #include <functional>
 #include <future>
 #include <chrono>
@@ -52,6 +53,18 @@ public:
     htdsp::TestSignalSettings testSettings;
     std::array<std::atomic<bool>, htdsp::channelCount> testInputs {};
 
+    std::atomic<int> sweepChannel { -1 };
+    std::atomic<bool> sweepPending { false }, sweepStop { false };
+
+    bool startSweep(int channel)
+    {
+        int idle = -1;
+        if (!sweepChannel.compare_exchange_strong(idle, channel)) return false;
+        sweepStop.store(false);
+        sweepPending.store(true);
+        return true;
+    }
+
     AudioEngine()
     {
         for (auto& route : callbackInputs) route.store(-1);
@@ -61,6 +74,11 @@ public:
     void audioDeviceAboutToStart(juce::AudioIODevice* device) override
     {
         const auto sampleRate = device != nullptr ? device->getCurrentSampleRate() : 48000.0;
+        sweepChannel.store(-1);
+        sweepPending.store(false);
+        sweepStop.store(false);
+        sweepRate = sampleRate;
+        restoreGain = 1.0f;
         generator.prepare(sampleRate);
         sourceBlend.fill(0.0f);
         blendStep = static_cast<float>(1.0 / (sampleRate * 0.01));
@@ -90,6 +108,8 @@ public:
 
     void audioDeviceStopped() override
     {
+        sweepChannel.store(-1);
+        sweepPending.store(false);
         // Clear stale meters/spectrum when the audio interface disconnects.
         for (auto& meter : telemetry) meter.prepare(48000.0);
     }
@@ -109,14 +129,29 @@ public:
             if (outputData[output] != nullptr)
                 juce::FloatVectorOperations::clear(outputData[output], numSamples);
 
+        if (sweepPending.exchange(false))
+            sweep.start(sweepRate, testSettings.levelDb.load());
+        sweep.setLevel(testSettings.levelDb.load());
+        const int sweptChannel = sweepChannel.load();
+        if (sweepStop.exchange(false)) sweep.stop();
+        const bool sweeping = sweptChannel >= 0;
         generator.beginBlock(testSettings);
         for (int path = 0; path < htdsp::channelCount; ++path)
-            processors[path].beginBlock(parameters[path]);
-        std::array<float, 256> generated {}, selectedInput {};
+            processors[path].beginBlock(parameters[path], sweeping && path == sweptChannel);
+        std::array<float, 256> generated {}, selectedInput {}, sweepInput {}, selectedGate {}, otherGate {}, restore {};
         for (int offset = 0; offset < numSamples; offset += 256)
         {
             const int count = std::min(256, numSamples - offset);
-            for (int n = 0; n < count; ++n) generated[n] = generator.next();
+            for (int n = 0; n < count; ++n)
+            {
+                generated[n] = generator.next();
+                sweepInput[n] = sweeping ? sweep.next() : 0.0f;
+                selectedGate[n] = sweeping ? sweep.outputGain(true) : 1.0f;
+                otherGate[n] = sweeping ? sweep.outputGain(false) : 1.0f;
+                if (sweeping) restoreGain = 0.0f;
+                else restoreGain = std::min(1.0f, restoreGain + blendStep);
+                restore[n] = restoreGain;
+            }
             for (int path = 0; path < htdsp::channelCount; ++path)
             {
                 const int input = callbackInputs[path].load();
@@ -132,12 +167,17 @@ public:
                     blend += std::clamp(target - blend, -blendStep, blendStep);
                     const float live = source ? source[n] : 0.0f;
                     selectedInput[n] = live * (1.0f - blend) + generated[n] * blend;
-                    const float result = processors[path].process(selectedInput[n]);
+                    if (sweeping && path == sweptChannel) selectedInput[n] = sweepInput[n];
+                    const float processed = processors[path].process(selectedInput[n]);
+                    const float gate = sweeping
+                        ? (path == sweptChannel ? selectedGate[n] : otherGate[n]) : restore[n];
+                    const float result = processed * gate;
                     if (destination) destination[n] = result;
                 }
                 telemetry[path].recordBlock(selectedInput.data(), destination, count);
             }
         }
+        if (sweeping && !sweep.running()) sweepChannel.store(-1);
     }
 
 private:
@@ -150,6 +190,9 @@ private:
         return index;
     }
 
+    htdsp::SineSweep sweep;
+    double sweepRate = 48000;
+    float restoreGain = 1.0f;
     htdsp::TestSignalGenerator generator;
     std::array<float, htdsp::channelCount> sourceBlend {};
     float blendStep = 0.002f;
@@ -504,6 +547,9 @@ public:
         };
         addAndMakeVisible(levelDelayToggle);
 
+        sweepButton.setButtonText("Sine sweep...");
+        addAndMakeVisible(sweepButton);
+        sweepButton.onClick = [this] { if (onSweep) onSweep(channelNumber - 1); };
         testInput.setButtonText("Use test signal");
         addAndMakeVisible(testInput);
         testInput.onClick = [this]
@@ -534,6 +580,12 @@ public:
         updateExpandedSections(); // Default: filters and EQ settings hidden.
     }
 
+    std::function<void(int)> onSweep;
+    void setSweepState(int activeChannel)
+    {
+        sweepButton.setEnabled(activeChannel < 0);
+        sweepButton.setButtonText(activeChannel == channelNumber - 1 ? "Sweeping..." : "Sine sweep...");
+    }
     std::function<void(int, bool)> onTestInputChange;
     void setTestInput(bool enabled) { testInput.setToggleState(enabled, juce::dontSendNotification); }
     std::function<void(int, bool)> onRouteChange;
@@ -610,7 +662,8 @@ public:
         output.setBounds(34 + half, 119, half, 31);
         meters.setBounds(18, 158, w - 36, 57);
         polarity.setBounds(24, 226, 240, 30);
-        testInput.setBounds(w - 190, 226, 170, 30);
+        testInput.setBounds(245, 226, 165, 30);
+        sweepButton.setBounds(w - 145, 226, 125, 30);
         graph.setBounds(20, 267, w - 40, 225);
         levelDelayToggle.setBounds(22, 501, w - 44, 31);
         levelCaption.setBounds(22, 546, 110, 22);
@@ -666,6 +719,7 @@ private:
     juce::ComboBox input, output;
     juce::Slider level, delay;
     juce::ToggleButton polarity, testInput;
+    juce::TextButton sweepButton;
     std::array<std::unique_ptr<EqRow>, dualdsp::kBands> eqRows;
 };
 
@@ -743,6 +797,11 @@ public:
         };
         addAndMakeVisible(channelSelect);
 
+        stopSweep.setButtonText("Stop sweep");
+        stopSweep.onClick = [this] { engine.sweepStop.store(true); };
+        addAndMakeVisible(stopSweep);
+        sweepStatus.setColour(juce::Label::textColourId, accentColour);
+        addAndMakeVisible(sweepStatus);
         generatorEnabled.setButtonText("Test generator ON");
         generatorEnabled.onClick = [this] { engine.testSettings.enabled.store(generatorEnabled.getToggleState()); };
         generatorMode.addItem("Pink noise", 1);
@@ -846,6 +905,22 @@ public:
         addAndMakeVisible(contentViewport);
         for (int ch = 0; ch < htdsp::channelCount; ++ch)
         {
+            strips[ch].onSweep = [this](int channel)
+            {
+                if (!canSweep(channel)) return;
+                const auto safe = juce::Component::SafePointer<MainComponent>(this);
+                juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::WarningIcon,
+                    "Play sine sweep?",
+                    "Proceed with caution. Play a 10-second 20 Hz to 20 kHz sweep on CH "
+                        + juce::String(channel + 1) + " at " + juce::String(engine.testSettings.levelDb.load(), 1)
+                        + " dBFS before channel processing. This temporarily unmutes this channel and mutes all other outputs. Previous mute states return when the sweep ends.",
+                    "Play sweep", "Cancel", this,
+                    juce::ModalCallbackFunction::create([safe, channel](int result)
+                    {
+                        if (safe != nullptr && result != 0 && safe->canSweep(channel))
+                            safe->launchSweep(channel);
+                    }));
+            };
             strips[ch].onTestInputChange = [this](int channel, bool enabled)
             {
                 strips[channel].setTestInput(engine.testInputs[channel].load());
@@ -964,6 +1039,8 @@ public:
         generatorMode.setBounds(sidebar.removeFromTop(32).reduced(2));
         generatorLevel.setBounds(sidebar.removeFromTop(38));
         generatorFrequency.setBounds(sidebar.removeFromTop(38));
+        stopSweep.setBounds(sidebar.removeFromTop(30).reduced(2));
+        sweepStatus.setBounds(sidebar.removeFromTop(26));
         sidebar.removeFromTop(12);
         deviceLabel.setBounds(sidebar.removeFromTop(28));
         deviceViewport.setBounds(sidebar.reduced(2));
@@ -988,6 +1065,8 @@ private:
     juce::AudioDeviceSelectorComponent selector;
     juce::Viewport deviceViewport, contentViewport;
     StripArea strips;
+    juce::TextButton stopSweep;
+    juce::Label sweepStatus;
     juce::ToggleButton generatorEnabled;
     juce::ComboBox generatorMode;
     juce::Slider generatorLevel, generatorFrequency;
@@ -1235,8 +1314,34 @@ private:
         std::lock_guard<std::mutex> guard(dataMutex);
         names[static_cast<std::size_t>(ch)] = n.substring(0, 40);
     }
+    void launchSweep(int channel)
+    {
+        const juce::ScopedLock lock(deviceManager.getAudioCallbackLock());
+        if (canSweep(channel)) engine.startSweep(channel);
+    }
+
+    bool canSweep(int channel)
+    {
+        if (engine.sweepChannel.load() >= 0) return false;
+        auto* device = deviceManager.getCurrentAudioDevice();
+        const int output = engine.parameters[channel].outputRoute.load();
+        if (device == nullptr || !device->isPlaying() || output < 0
+            || !device->getActiveOutputChannels()[output])
+        {
+            info.setText("Select an active output route before playing a sweep.", juce::dontSendNotification);
+            return false;
+        }
+        return true;
+    }
+
     void syncStrips()
     {
+        const int sweeping = engine.sweepChannel.load();
+        stopSweep.setEnabled(sweeping >= 0);
+        sweepStatus.setText(sweeping >= 0 ? "Sweeping CH " + juce::String(sweeping + 1) + " - others muted" : "",
+                           juce::dontSendNotification);
+        for (int ch = 0; ch < htdsp::channelCount; ++ch) strips[ch].setSweepState(sweeping);
+
         generatorEnabled.setToggleState(engine.testSettings.enabled.load(), juce::dontSendNotification);
         generatorMode.setSelectedId(engine.testSettings.mode.load() + 1, juce::dontSendNotification);
         if (!generatorLevel.isMouseButtonDown())
@@ -1368,6 +1473,7 @@ private:
         if (includeCurves)
         {
             auto test = std::make_unique<juce::DynamicObject>();
+            test->setProperty("sweepChannel", engine.sweepChannel.load());
             test->setProperty("enabled", engine.testSettings.enabled.load());
             test->setProperty("mode", engine.testSettings.mode.load());
             test->setProperty("frequency", engine.testSettings.frequency.load());
@@ -1536,6 +1642,19 @@ private:
     }
     void handleRemote(const juce::var& command)
     {
+        if (command.getProperty("key", {}).toString() == "stopSweep")
+        {
+            engine.sweepStop.store(true);
+            return;
+        }
+        if (command.getProperty("key", {}).toString() == "sweep")
+        {
+            const int channel = static_cast<int>(command.getProperty("channel", -1));
+            if (channel >= 0 && channel < htdsp::channelCount
+                && static_cast<bool>(command.getProperty("confirmed", false)) && canSweep(channel))
+                launchSweep(channel);
+            return;
+        }
         if (command.hasProperty("channels")) { applySnapshot(command); return; }
         if (command.getProperty("generator", false))
         {
@@ -1604,7 +1723,7 @@ class HTDSPApp final : public juce::JUCEApplication
 {
 public:
     const juce::String getApplicationName() override { return "HT DSP"; }
-    const juce::String getApplicationVersion() override { return "0.2.0"; }
+    const juce::String getApplicationVersion() override { return "0.3.0"; }
     bool moreThanOneInstanceAllowed() override { return false; }
 
     void initialise(const juce::String&) override

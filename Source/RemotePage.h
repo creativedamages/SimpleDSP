@@ -23,7 +23,7 @@ static constexpr const char* kRemotePage = R"DSP_HTML(<!doctype html>
 <select id="generatorMode" aria-label="Test signal" onchange="setGenerator('mode',Number(this.value))"><option value="0">Pink noise</option><option value="1">Sine oscillator</option><option value="2">1 kHz tone</option></select>
 <div class="control"><label for="generatorLevel">Global level</label><input id="generatorLevel" type="range" min="-90" max="0" step="0.1" value="-40" oninput="this.nextElementSibling.textContent=this.value+' dBFS';setGenerator('levelDb',Number(this.value))"><output>-40 dBFS</output></div>
 <div class="control"><label for="generatorFrequency">Frequency</label><input id="generatorFrequency" type="number" min="20" max="20000" step="1" value="1000" onchange="setGenerator('frequency',Number(this.value))"><output>Hz</output></div>
-</section><div class="channel-select"><label for="channelPicker">Channel</label><select id="channelPicker" onchange="selectChannel(Number(this.value))"></select></div><main class="channels" id="channels"></main></div><div class="toast" id="toast"></div>
+<button id="stopSweep" onclick="stopSineSweep()" disabled>Stop sweep</button><span id="sweepStatus" role="status"></span></section><div class="channel-select"><label for="channelPicker">Channel</label><select id="channelPicker" onchange="selectChannel(Number(this.value))"></select></div><main class="channels" id="channels"></main></div><div class="toast" id="toast"></div>
 <script>
 )DSP_HTML"
 R"DSP_HTML(let pin=localStorage.getItem('htDspPin')||'',model=null,telemetry=null,selectedTab=0,busy=false,editingUntil=0,telemetryBusy=false;
@@ -32,6 +32,29 @@ const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>"']/g,
 function notice(s){$('toast').textContent=s;$('toast').style.display='block';setTimeout(()=>$('toast').style.display='none',2800)}
 async function api(path,method='GET',data){const r=await fetch(path,{method,headers:{'X-DSP-PIN':pin,'Content-Type':'application/json'},body:data?JSON.stringify(data):undefined,cache:'no-store'});if(r.status===401){$('app').style.display='none';$('pin').style.display='block';throw Error('Enter PIN from the Windows application')}if(!r.ok)throw Error((await r.text()).slice(0,120));return r.json()}
 function connectPin(){pin=$('pinvalue').value.trim();localStorage.setItem('htDspPin',pin);refresh(true)}
+async function playSweep(channel){
+  try{
+    const current=await api('/api/state');
+    if(current.generator.sweepChannel>=0){notice('A sweep is already running.');return}
+    if(current.channels[channel].outputRoute<0){notice('Assign an output route first.');return}
+    if(!confirm('Proceed with caution. Play a 10-second 20 Hz to 20 kHz sine sweep on CH '+(channel+1)+' at '+current.generator.levelDb+' dBFS before channel processing? This temporarily unmutes this channel and mutes all other outputs. Previous mute states return afterward.'))return;
+    await api('/api/set','POST',{channel,key:'sweep',confirmed:true});
+    setTimeout(()=>refresh(true),150);
+  }catch(e){notice(e.message)}
+}
+async function stopSineSweep(){
+  try{await api('/api/set','POST',{key:'stopSweep'});setTimeout(()=>refresh(true),150)}
+  catch(e){notice(e.message)}
+}
+function syncSweep(g){
+  const channel=g?.sweepChannel??-1;
+  $('stopSweep').disabled=channel<0;
+  $('sweepStatus').textContent=channel>=0?' Sweeping CH '+(channel+1)+' - all other outputs muted':'';
+  document.querySelectorAll('[data-sweep]').forEach(button=>{
+    button.disabled=channel>=0;
+    button.textContent=Number(button.dataset.sweep)===channel?'Sweeping...':'Sine sweep...';
+  });
+}
 async function setGenerator(key,value){
   if(typeof value==='number'&&!Number.isFinite(value))return;
   editingUntil=Date.now()+1100;
@@ -79,12 +102,13 @@ function renderChannel(){
   const live=telemetry?.channel===selectedTab?telemetry:null;
   graph(document.querySelector('[data-graph]'),c,live);
   paintMeters();
+  syncSweep(model.generator);
 }
 
 const format=(v,d=1)=>Number(v).toFixed(d);function range(ch,key,label,val,min,max,step,unit,band){const idx=band===undefined?'':` data-band="${band}"`,log=key==='frequencyHz'||key.endsWith('.frequency');return `<div class="control"><label>${label}</label><input type="range" data-ch="${ch}" data-key="${key}"${idx} data-log="${log?'1':'0'}" min="${log?0:min}" max="${log?1000:max}" step="${log?1:step}" value="${log?Math.round(Math.log(Math.max(20,val)/20)/Math.log(1000)*1000):val}"><output>${format(val,step<.1?2:step<1?1:0)} ${unit}</output></div>`}
 function cutoff(ch,key,caption,filter){return `<div class="filter"><div class="head"><label class="checkline"><input type="checkbox" data-ch="${ch}" data-key="${key}.enabled" ${filter.enabled?'checked':''}>${caption}</label><select data-ch="${ch}" data-key="${key}.slope"><option value="12" ${filter.slope==12?'selected':''}>12 dB/oct</option><option value="24" ${filter.slope==24?'selected':''}>24 dB/oct</option></select></div>${range(ch,key+'.frequency','Frequency',filter.frequency,20,20000,1,'Hz')}</div>`}
 function meterHtml(i){return `<div class="meters"><div class="meterheading">SIGNAL · PEAK dBFS / RMS FILL</div><div class="meterline in"><span class="meterlabel">IN</span><div class="metertrack"><div class="meterrms" data-rms="${i}-in"></div><div class="meterpeak" data-peak="${i}-in"></div></div><span class="metervalue" data-meter-value="${i}-in">-96.0</span><button type="button" class="clipbtn" onclick="clearClip(${i},'in')" aria-label="Clear input clip indicator">CLIP</button></div><div class="meterline out"><span class="meterlabel">OUT</span><div class="metertrack"><div class="meterrms" data-rms="${i}-out"></div><div class="meterpeak" data-peak="${i}-out"></div></div><span class="metervalue" data-meter-value="${i}-out">-96.0</span><button type="button" class="clipbtn" onclick="clearClip(${i},'out')" aria-label="Clear output clip indicator">CLIP</button></div></div>`}
-function channel(c,i,m){return `<section class="panel" data-channel="${i}"><div class="channel-title"><h2>CH ${i+1}</h2><input type="text" maxlength="40" data-ch="${i}" data-key="name" aria-label="CH ${i+1} name" value="${esc(c.name)}"><button type="button" class="mute ${c.outputMuted?'muted':''}" data-mute="${i}" aria-pressed="${c.outputMuted?'true':'false'}" onclick="toggleMute(${i})">${c.outputMuted?'MUTED':'MUTE OUT'}</button></div><div class="routing"><div><label>Input</label><select data-ch="${i}" data-key="inputRoute">${options(m.inputs,c.inputRoute)}</select></div><div><label>Output</label><select data-ch="${i}" data-key="outputRoute">${options(m.outputs,c.outputRoute)}</select></div></div><label class="checkline"><input type="checkbox" data-test-input="${i}" ${c.testInput?'checked':''} onchange="engageTestInput(${i},this)">Use test signal</label>${meterHtml(i)}<canvas class="graph" data-graph="${i}" width="640" height="350"></canvas><div class="graphlegend"><span class="eq-dot">● EQ curve</span><span class="input-dot">● Input RTA</span><span class="rta-dot">● Output RTA · dBFS</span></div><details class="fold" data-fold="${i}-level" ${foldState[i+'-level']?'open':''}><summary>Level and delay</summary>${range(i,'levelDb','Level',c.levelDb,-90,18,.1,'dB')}${range(i,'delayMs','Delay',c.delayMs,0,500,.01,'ms')}</details><label class="checkline"><input type="checkbox" data-ch="${i}" data-key="invertPolarity" ${c.invertPolarity?'checked':''}>Invert polarity (180 deg)</label><details class="fold" data-fold="${i}-filters" ${foldState[i+'-filters']?'open':''}><summary>Filters · High-pass / Low-pass</summary>${cutoff(i,'highPass','High-pass',c.highPass)}${cutoff(i,'lowPass','Low-pass',c.lowPass)}</details><details class="fold" data-fold="${i}-eq" ${foldState[i+'-eq']?'open':''}><summary>Parametric EQ · six bands</summary>${c.eq.map((b,j)=>`<div class="band"><strong>Band ${j+1}</strong>${range(i,'frequencyHz','Frequency',b.frequencyHz,20,20000,1,'Hz',j)}${range(i,'gainDb','Gain',b.gainDb,-18,18,.1,'dB',j)}${range(i,'q','Q',b.q,.1,15,.05,'',j)}</div>`).join('')}</details></section>`}
+function channel(c,i,m){return `<section class="panel" data-channel="${i}"><div class="channel-title"><h2>CH ${i+1}</h2><input type="text" maxlength="40" data-ch="${i}" data-key="name" aria-label="CH ${i+1} name" value="${esc(c.name)}"><button type="button" class="mute ${c.outputMuted?'muted':''}" data-mute="${i}" aria-pressed="${c.outputMuted?'true':'false'}" onclick="toggleMute(${i})">${c.outputMuted?'MUTED':'MUTE OUT'}</button></div><div class="routing"><div><label>Input</label><select data-ch="${i}" data-key="inputRoute">${options(m.inputs,c.inputRoute)}</select></div><div><label>Output</label><select data-ch="${i}" data-key="outputRoute">${options(m.outputs,c.outputRoute)}</select></div></div><label class="checkline"><input type="checkbox" data-test-input="${i}" ${c.testInput?'checked':''} onchange="engageTestInput(${i},this)">Use test signal</label><button type="button" data-sweep="${i}" onclick="playSweep(${i})">Sine sweep...</button>${meterHtml(i)}<canvas class="graph" data-graph="${i}" width="640" height="350"></canvas><div class="graphlegend"><span class="eq-dot">● EQ curve</span><span class="input-dot">● Input RTA</span><span class="rta-dot">● Output RTA · dBFS</span></div><details class="fold" data-fold="${i}-level" ${foldState[i+'-level']?'open':''}><summary>Level and delay</summary>${range(i,'levelDb','Level',c.levelDb,-90,18,.1,'dB')}${range(i,'delayMs','Delay',c.delayMs,0,500,.01,'ms')}</details><label class="checkline"><input type="checkbox" data-ch="${i}" data-key="invertPolarity" ${c.invertPolarity?'checked':''}>Invert polarity (180 deg)</label><details class="fold" data-fold="${i}-filters" ${foldState[i+'-filters']?'open':''}><summary>Filters · High-pass / Low-pass</summary>${cutoff(i,'highPass','High-pass',c.highPass)}${cutoff(i,'lowPass','Low-pass',c.lowPass)}</details><details class="fold" data-fold="${i}-eq" ${foldState[i+'-eq']?'open':''}><summary>Parametric EQ · six bands</summary>${c.eq.map((b,j)=>`<div class="band"><strong>Band ${j+1}</strong>${range(i,'frequencyHz','Frequency',b.frequencyHz,20,20000,1,'Hz',j)}${range(i,'gainDb','Gain',b.gainDb,-18,18,.1,'dB',j)}${range(i,'q','Q',b.q,.1,15,.05,'',j)}</div>`).join('')}</details></section>`}
 function options(arr,selected){return `<option value="-1">Unassigned</option>`+arr.map((s,j)=>`<option value="${j}" ${j===selected?'selected':''}>${j+1}: ${esc(s)}</option>`).join('')}
 async function send(ch,key,value,band){try{await api('/api/set','POST',{channel:ch,key,value,...(band===undefined?{}:{band})})}catch(e){notice(e.message)}}
 async function toggleMute(ch){const c=model?.channels?.[ch];if(!c)return;const mute=!Boolean(c.outputMuted);c.outputMuted=mute;const el=document.querySelector(`[data-mute="${ch}"]`);if(el){el.classList.toggle('muted',mute);el.setAttribute('aria-pressed',String(mute));el.textContent=mute?'MUTED':'MUTE OUT'}editingUntil=Date.now()+650;try{await api('/api/set','POST',{channel:ch,key:'outputMuted',value:mute})}catch(e){notice('Mute change failed: '+e.message);await refresh(true)}}
@@ -94,6 +118,7 @@ function render(m){
   const previous=model;
   model=m;
   syncGenerator(m.generator);
+  syncSweep(m.generator);
   $('pin').style.display='none';
   $('app').style.display='block';
   $('startupStatus').textContent=m.loadAtLaunch&&m.startupPresetName?'Load at launch: '+m.startupPresetName+' ✓':m.startupPresetName?'Load at launch: off · selected '+m.startupPresetName:'Load at launch: not configured';
@@ -134,7 +159,8 @@ async function refreshTelemetry(){
   finally{telemetryBusy=false}
 }
 
-async function refresh(force){if(busy||!force&&(Date.now()<editingUntil||document.activeElement?.matches('input[data-key="name"]')))return;busy=true;try{const state=await api('/api/state');$('status').textContent='Connected · '+state.device;render(state);}catch(e){$('status').textContent=e.message;if(e.message.includes('PIN'))$('pin').style.display='block'}finally{busy=false}}
+)DSP_HTML"
+R"DSP_HTML(async function refresh(force){if(busy||!force&&(Date.now()<editingUntil||document.activeElement?.matches('input[data-key="name"]')))return;busy=true;try{const state=await api('/api/state');$('status').textContent='Connected · '+state.device;render(state);}catch(e){$('status').textContent=e.message;if(e.message.includes('PIN'))$('pin').style.display='block'}finally{busy=false}}
 async function presets(){try{const selected=$('presets').value;const m=await api('/api/presets');$('presets').innerHTML=`<option value="">Select preset</option>`+m.names.map(n=>`<option value="${esc(n)}">${esc(n)}</option>`).join('');$('presets').value=m.names.includes(selected)?selected:''}catch(e){}}
 async function savePreset(){const name=$('presetname').value.trim();if(!name){notice('Enter a preset name');return}try{await api('/api/save','POST',{name});notice('Saved on Windows PC');await presets();const clean=name.replace(/[^a-zA-Z0-9 _()\-]/g,'').trim().slice(0,60);$('presets').value=clean}catch(e){notice(e.message)}}
 async function loadPreset(){const name=$('presets').value;if(!name){notice('Choose a preset');return}try{await api('/api/load','POST',{name});notice('Preset loaded');setTimeout(()=>refresh(true),200)}catch(e){notice(e.message)}}
