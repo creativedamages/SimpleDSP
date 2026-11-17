@@ -34,7 +34,8 @@ fi
 
 echo "Installing Simple DSP Pi for $USER_NAME on Raspberry Pi OS..."
 sudo apt-get update
-sudo apt-get install -y --no-install-recommends libasound2 alsa-utils ca-certificates
+# alsa-utils pulls the appropriate ALSA library on both Bookworm and Trixie.
+sudo apt-get install -y --no-install-recommends alsa-utils ca-certificates
 sudo install -d -m 755 /opt/simple-dsp
 sudo install -m 755 "$DIR/simple-dsp-pi" /opt/simple-dsp/simple-dsp-pi
 
