@@ -57,7 +57,8 @@ public:
     void audioDeviceAboutToStart(juce::AudioIODevice* device) override
     {
         const auto sampleRate = device != nullptr ? device->getCurrentSampleRate() : 48000.0;
-        for (auto& processor : processors) processor.prepare(sampleRate);
+        for (int ch = 0; ch < htdsp::channelCount; ++ch)
+            processors[ch].prepare(sampleRate, parameters[ch].outputMuted.load());
         for (auto& meter : telemetry) meter.prepare(sampleRate);
 
         // JUCE's callback arrays are packed in active-channel order, even when

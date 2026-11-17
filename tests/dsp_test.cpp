@@ -19,6 +19,11 @@ int main()
     using namespace dualdsp;
     ChannelSettings settings;
     MonoProcessor processor;
+    settings.outputMuted.store(true);
+    processor.prepare(48000.0, true);
+    processor.beginBlock(settings);
+    assert(processor.process(1.0f) == 0.0f);
+    settings.outputMuted.store(false);
     processor.prepare(48000.0);
     processor.beginBlock(settings);
     // A unity channel with flat PEQs and zero delay must pass samples unchanged.

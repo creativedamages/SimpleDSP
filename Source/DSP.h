@@ -195,7 +195,7 @@ inline double responseDb (const ChannelSettings& settings, double sampleRate, do
 class MonoProcessor
 {
 public:
-    void prepare (double newSampleRate)
+    void prepare (double newSampleRate, bool initiallyMuted = false)
     {
         sampleRate = std::max(8000.0, newSampleRate);
         delayBuffer.assign(static_cast<std::size_t>(std::ceil(sampleRate * kMaxDelayMs / 1000.0)) + 8, 0.0f);
@@ -206,7 +206,7 @@ public:
         for (auto& cached : oldValues) cached = { -1.0, -999.0, -1.0 };
         gainRamp.prepare(sampleRate, 0.015, 1.0);
         polarityRamp.prepare(sampleRate, 0.003, 1.0);
-        muteRamp.prepare(sampleRate, 0.006, 1.0); // Click-free 6 ms mute/unmute.
+        muteRamp.prepare(sampleRate, 0.006, initiallyMuted ? 0.0 : 1.0); // Click-free 6 ms mute/unmute.
         delayRamp.prepare(sampleRate, 0.035, 0.0);
     }
 
