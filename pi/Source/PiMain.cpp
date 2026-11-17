@@ -569,7 +569,7 @@ private:
 
     void tryOpenAudio()
     {
-        auto types=deviceManager.getAvailableDeviceTypes();
+        const auto& types=deviceManager.getAvailableDeviceTypes();
         juce::AudioIODeviceType* alsa=nullptr;
         for(auto* t:types)
             if(t->getTypeName().containsIgnoreCase("ALSA")) {alsa=t;break;}
