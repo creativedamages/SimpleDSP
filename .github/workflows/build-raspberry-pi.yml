@@ -69,6 +69,65 @@ jobs:
           "$exe" --help
           "$exe" --check-config --config "$PWD/pi/config.example.json"
 
+      - name: Smoke-test phone remote, mute and startup preset (no audio)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, pathlib, signal, subprocess, tempfile, time, urllib.request
+          binary = next(p.resolve() for p in pathlib.Path('build-pi').rglob('*') if p.is_file() and p.name in ('SimpleDSPPi', 'Simple DSP Pi') and os.access(p, os.X_OK))
+          with tempfile.TemporaryDirectory() as root:
+              home = pathlib.Path(root)
+              cfg = json.loads(pathlib.Path('pi/config.example.json').read_text())
+              cfg['remote_pin'] = '123456'
+              cfg['remote_pin_required'] = True
+              cfg['bind_address'] = '127.0.0.1'
+              cfg['start_muted'] = True
+              cfg['http_port'] = 18765
+              path = home / 'config.json'
+              path.write_text(json.dumps(cfg))
+              env = dict(os.environ, HOME=str(home))
+              p = subprocess.Popen([str(binary), '--no-audio', '--config', str(path)], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+              def req(endpoint, body=None):
+                  data = None if body is None else json.dumps(body).encode()
+                  request = urllib.request.Request('http://127.0.0.1:18765' + endpoint, data=data,
+                      headers={'X-DSP-PIN': '123456', 'Content-Type': 'application/json'})
+                  with urllib.request.urlopen(request, timeout=3) as response:
+                      return response.read().decode()
+              try:
+                  for _ in range(40):
+                      if p.poll() is not None:
+                          raise RuntimeError('Headless server exited early')
+                      try:
+                          state = json.loads(req('/api/state'))
+                          break
+                      except Exception:
+                          time.sleep(.25)
+                  else:
+                      raise RuntimeError('Remote HTTP server did not start')
+                  assert len(state['channels']) == 2
+                  assert state['channels'][0]['outputMuted'] is True
+                  req('/api/set', {'channel': 0, 'key': 'outputMuted', 'value': False})
+                  assert json.loads(req('/api/state'))['channels'][0]['outputMuted'] is False
+                  telem = json.loads(req('/api/telemetry'))
+                  assert len(telem['channels']) == 2
+                  assert len(telem['channels'][0]['inputRta']) == 128
+                  req('/api/save', {'name': 'SmokePreset'})
+                  preset = home / '.local/share/simple-dsp/Presets/SmokePreset.dsp.json'
+                  assert preset.exists()
+                  response = json.loads(req('/api/startup', {'name': 'SmokePreset'}))
+                  assert response['ok'] and response['loadAtLaunch']
+                  saved = json.loads(path.read_text())
+                  assert saved['load_at_launch'] and saved['startup_preset'] == 'SmokePreset'
+                  print('Remote HTTP, mute, telemetry, preset save and startup selection: PASS')
+              finally:
+                  p.send_signal(signal.SIGTERM)
+                  try: p.communicate(timeout=8)
+                  except subprocess.TimeoutExpired:
+                      p.kill(); p.communicate()
+                  assert p.returncode == 0, f'Server returned {p.returncode}'
+          PY
+
       - name: Package installer and headless app
         shell: bash
         run: |
