@@ -1,10 +1,21 @@
 #include "../Source/DSP.h"
+#include "../Source/ProjectSettings.h"
 #include <cassert>
 #include <cmath>
 #include <iostream>
 
 int main()
 {
+    static_assert(htdsp::channelCount == 16);
+    std::array<int, htdsp::channelCount> routes;
+    routes.fill(-1);
+    routes[0] = 31;
+    routes[15] = 62;
+    assert(htdsp::outputIsAssigned(routes, 0, 62));
+    assert(htdsp::outputIsAssigned(routes, 15, 31));
+    assert(!htdsp::outputIsAssigned(routes, 15, 62));
+    assert(!htdsp::outputIsAssigned(routes, 15, -1));
+
     using namespace dualdsp;
     ChannelSettings settings;
     MonoProcessor processor;

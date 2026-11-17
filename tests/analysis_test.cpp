@@ -12,7 +12,7 @@ int main()
     static dualdsp::SpectrumAnalyzer analyzer;
     static dualdsp::SpectrumAnalyzer inputAnalyzer;
     std::vector<float> in(512), out(512);
-    for (int block = 0; block < 30; ++block)
+    for (int block = 0; block < (dualdsp::kRtaFftSize + 511) / 512; ++block)
     {
         for (int n = 0; n < 512; ++n)
         {
