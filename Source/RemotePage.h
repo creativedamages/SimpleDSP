@@ -46,6 +46,17 @@ async function stopSineSweep(){
   try{await api('/api/set','POST',{key:'stopSweep'});setTimeout(()=>refresh(true),150)}
   catch(e){notice(e.message)}
 }
+function syncTestMute(){
+  if(!model)return;
+  const ch=selectedTab,c=model.channels[ch],g=model.generator;
+  const mutedByTest=g?.enabled && !c.testInput && g.sweepChannel<0;
+  const button=document.querySelector('[data-mute]');
+  if(!button)return;
+  button.disabled=Boolean(mutedByTest);
+  button.classList.toggle('muted',Boolean(mutedByTest||c.outputMuted));
+  button.setAttribute('aria-pressed',String(Boolean(mutedByTest||c.outputMuted)));
+  button.textContent=mutedByTest?'TEST MUTED':c.outputMuted?'MUTED':'MUTE OUT';
+}
 function syncSweep(g){
   const channel=g?.sweepChannel??-1;
   $('stopSweep').disabled=channel<0;
@@ -103,6 +114,7 @@ function renderChannel(){
   graph(document.querySelector('[data-graph]'),c,live);
   paintMeters();
   syncSweep(model.generator);
+  syncTestMute();
 }
 
 const format=(v,d=1)=>Number(v).toFixed(d);function range(ch,key,label,val,min,max,step,unit,band){const idx=band===undefined?'':` data-band="${band}"`,log=key==='frequencyHz'||key.endsWith('.frequency');return `<div class="control"><label>${label}</label><input type="range" data-ch="${ch}" data-key="${key}"${idx} data-log="${log?'1':'0'}" min="${log?0:min}" max="${log?1000:max}" step="${log?1:step}" value="${log?Math.round(Math.log(Math.max(20,val)/20)/Math.log(1000)*1000):val}"><output>${format(val,step<.1?2:step<1?1:0)} ${unit}</output></div>`}
@@ -119,6 +131,7 @@ function render(m){
   model=m;
   syncGenerator(m.generator);
   syncSweep(m.generator);
+  syncTestMute();
   $('pin').style.display='none';
   $('app').style.display='block';
   $('startupStatus').textContent=m.loadAtLaunch&&m.startupPresetName?'Load at launch: '+m.startupPresetName+' ✓':m.startupPresetName?'Load at launch: off · selected '+m.startupPresetName:'Load at launch: not configured';

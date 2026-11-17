@@ -135,6 +135,7 @@ public:
         const int sweptChannel = sweepChannel.load();
         if (sweepStop.exchange(false)) sweep.stop();
         const bool sweeping = sweptChannel >= 0;
+        const bool generatorOn = testSettings.enabled.load();
         generator.beginBlock(testSettings);
         for (int path = 0; path < htdsp::channelCount; ++path)
             processors[path].beginBlock(parameters[path], sweeping && path == sweptChannel);
@@ -160,7 +161,9 @@ public:
                     ? inputData[input] + offset : nullptr;
                 float* destination = output >= 0 && output < outputCount && outputData[output]
                     ? outputData[output] + offset : nullptr;
-                const float target = testInputs[path].load() ? 1.0f : 0.0f;
+                const bool testSelected = testInputs[path].load();
+                const bool generatorMuted = generatorOn && !testSelected;
+                const float target = testSelected ? 1.0f : 0.0f;
                 for (int n = 0; n < count; ++n)
                 {
                     auto& blend = sourceBlend[path];
@@ -170,7 +173,8 @@ public:
                     if (sweeping && path == sweptChannel) selectedInput[n] = sweepInput[n];
                     const float processed = processors[path].process(selectedInput[n]);
                     const float gate = sweeping
-                        ? (path == sweptChannel ? selectedGate[n] : otherGate[n]) : restore[n];
+                        ? (path == sweptChannel ? selectedGate[n] : otherGate[n])
+                        : (generatorMuted ? 0.0f : restore[n]);
                     const float result = processed * gate;
                     if (destination) destination[n] = result;
                 }
@@ -587,6 +591,11 @@ public:
         sweepButton.setButtonText(activeChannel == channelNumber - 1 ? "Sweeping..." : "Sine sweep...");
     }
     std::function<void(int, bool)> onTestInputChange;
+    void setGeneratorMuted(bool muted)
+    {
+        generatorMuted = muted;
+        updateMuteButton();
+    }
     void setTestInput(bool enabled) { testInput.setToggleState(enabled, juce::dontSendNotification); }
     std::function<void(int, bool)> onRouteChange;
     std::function<void(int, juce::String)> onNameChange;
@@ -684,9 +693,10 @@ public:
 private:
     void updateMuteButton()
     {
-        const bool muted = params.outputMuted.load();
+        const bool muted = generatorMuted || params.outputMuted.load();
+        muteButton.setEnabled(!generatorMuted);
         muteButton.setToggleState(muted, juce::dontSendNotification);
-        muteButton.setButtonText(muted ? "MUTED" : "MUTE OUT");
+        muteButton.setButtonText(generatorMuted ? "TEST MUTED" : (muted ? "MUTED" : "MUTE OUT"));
     }
     void updateExpandedSections()
     {
@@ -718,6 +728,7 @@ private:
     CutoffRow lp { "Low-pass enabled", params.lowPass };
     juce::ComboBox input, output;
     juce::Slider level, delay;
+    bool generatorMuted = false;
     juce::ToggleButton polarity, testInput;
     juce::TextButton sweepButton;
     std::array<std::unique_ptr<EqRow>, dualdsp::kBands> eqRows;
@@ -1365,6 +1376,8 @@ private:
         const int selected = strips.selectedChannel();
         if (channelSelect.getSelectedId() != selected + 1)
             channelSelect.setSelectedId(selected + 1, juce::dontSendNotification);
+        strips[selected].setGeneratorMuted(sweeping < 0 && engine.testSettings.enabled.load()
+                                          && !engine.testInputs[selected].load());
         strips[selected].setTestInput(engine.testInputs[selected].load());
         strips[selected].sync(currentNames[selected]);
     }
@@ -1723,7 +1736,7 @@ class HTDSPApp final : public juce::JUCEApplication
 {
 public:
     const juce::String getApplicationName() override { return "HT DSP"; }
-    const juce::String getApplicationVersion() override { return "0.3.0"; }
+    const juce::String getApplicationVersion() override { return "0.3.1"; }
     bool moreThanOneInstanceAllowed() override { return false; }
 
     void initialise(const juce::String&) override
