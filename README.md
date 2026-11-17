@@ -1,8 +1,16 @@
-# Simple DSP — Windows application v0.6.0
+# Simple DSP — Windows v0.6.0 and Raspberry Pi 4
 
 **Simple DSP** is a locally running JUCE-based Windows audio processor with two separate mono processing paths today. The branding does not specify a channel count because more channels may be added in a future update.
 
 **This download is the full source project, not a precompiled Windows EXE.** The included GitHub Actions workflow builds the EXE online, so Visual Studio is not required on your own PC. The GUI and live audio hardware still need Windows build and device validation.
+
+## Raspberry Pi 4 (headless ARM64)
+
+An independent **Raspberry Pi 4 / Raspberry Pi OS Lite 64-bit** target now lives in [pi/README-PI.md](pi/README-PI.md). It reuses the same DSP engine, mobile web GUI and preset format. The Pi connects to a supported ALSA USB audio interface such as the Scarlett Solo 3rd Gen and runs automatically as a systemd service; no desktop, development tools or Docker are required on the Pi.
+
+Download the ready-to-install native ARM64 artifact named **SimpleDSP-RaspberryPi4-ARM64** from **Actions → Build Raspberry Pi 4 application (ARM64)**. The ZIP contains the executable, installer, configuration example, and Pi instructions. The original Windows build and workflow are unchanged.
+
+The Pi is **muted on first boot** until you unmute in the phone UI. Build and software tests are performed in ARM64 CI; USB audio stability and real-world latency require testing on the actual Pi/Scarlett.
 
 ## Updates in v0.3
 
