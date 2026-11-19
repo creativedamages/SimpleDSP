@@ -3,6 +3,11 @@ project(SimpleDSP VERSION 0.4.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Bundle the MSVC runtime so the portable Windows executable can run without a separate redistributable.
+if(MSVC)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 include(FetchContent)
 FetchContent_Declare(juce
   GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
