@@ -5,5 +5,6 @@ if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed' }
 cmake --build build --config Release --parallel 4
 if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
 ctest --test-dir build -C Release --output-on-failure
+if ($LASTEXITCODE -ne 0) { throw 'DSP tests failed' }
 Write-Host 'Windows application:'
-Get-ChildItem -Path build -Filter 'HT DSP.exe' -Recurse | Select-Object -ExpandProperty FullName
+Get-ChildItem -Path build -Filter 'SimpleDSP.exe' -Recurse | Select-Object -ExpandProperty FullName

@@ -67,6 +67,17 @@ int main()
     telemetry.clearClip(false);
     assert(!telemetry.takeLevels().outputClip);
 
+    // A quarter-rate sinusoid with samples at ±0.8 reaches ±1.131 between samples.
+    static dualdsp::AudioTelemetry truePeak;
+    truePeak.prepare(rate);
+    for (int n = 0; n < 512; ++n) in[n] = n % 4 < 2 ? 0.8f : -0.8f;
+    for (int block = 0; block < 4; ++block)
+        truePeak.recordBlock(in.data(), in.data(), 512);
+    const auto interSample = truePeak.takeLevels();
+    assert(interSample.inputPeak < -1.9f && !interSample.inputClip);
+    assert(interSample.outputPeak > 0.9f && interSample.outputPeak < 1.5f && interSample.outputClip);
+    assert(dualdsp::rtaMaxHz(48000) == 20000 && dualdsp::rtaMaxHz(32000) == 15680);
+
     // With a 16k FFT at 48kHz, a 32Hz tone has ~3Hz native resolution
     // rather than the old ~12Hz, providing better bass trace detail.
     static_assert(dualdsp::kRtaFftSize >= 16384, "FFT must resolve low bass");
@@ -89,6 +100,6 @@ int main()
     const double bassPeak = 20.0 * std::pow(1000.0,
         static_cast<double>(bassMax) / (dualdsp::kRtaBins-1));
     assert(bassPeak > 27.0 && bassPeak < 40.0);
-    std::cout << "Meters, independent clip latches, and 32Hz/1kHz RTAs passed.\\n";
+    std::cout << "Meters, true peak, independent clip latches and 32Hz/1kHz RTAs passed.\n";
 
 }

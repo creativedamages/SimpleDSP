@@ -159,7 +159,7 @@ private:
         if (method == "GET" && path == "/manifest.webmanifest")
         {
             send(client, 200,
-                R"JSON({"name":"HT DSP","short_name":"HT DSP","start_url":"/","scope":"/","display":"standalone","background_color":"#111821","theme_color":"#111821"})JSON",
+                R"JSON({"name":"SimpleDSP","short_name":"SimpleDSP","start_url":"/","scope":"/","display":"standalone","background_color":"#111821","theme_color":"#111821"})JSON",
                 "application/manifest+json"); return;
         }
         bool authorised = !requiresPin.load();
@@ -215,8 +215,7 @@ private:
         if (!file.existsAsFile()) { send(client, 404, jsonError("Preset not found"), "application/json"); return; }
         if (file.getSize() > htdsp::maxPresetBytes) { send(client, 400, jsonError("Preset too large"), "application/json"); return; }
         const auto loaded = juce::JSON::parse(file.loadFileAsString());
-        const auto channels = loaded.getProperty("channels", {});
-        if (!htdsp::hasValidChannels(channels))
+        if (!htdsp::hasValidPreset(loaded))
         { send(client, 400, jsonError("Corrupt preset"), "application/json"); return; }
         if (path == "/api/startup")
         {

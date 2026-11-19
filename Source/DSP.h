@@ -9,9 +9,14 @@
 
 namespace dualdsp
 {
-constexpr int kChannels = 2;
 constexpr int kBands = 6;
-constexpr double kMaxDelayMs = 500.0;
+constexpr double kMaxDelayMs = 50.0;
+constexpr double kDelayStepMs = 0.25;
+
+inline double normalizedDelayMs(double ms) noexcept
+{
+    return std::isfinite(ms) ? std::round(std::clamp(ms, 0.0, kMaxDelayMs) / kDelayStepMs) * kDelayStepMs : 0.0;
+}
 constexpr double kPi = 3.1415926535897932384626433832795;
 
 struct EqSettings
@@ -69,6 +74,8 @@ public:
         increment = (target - current) / static_cast<double>(duration);
         remaining = duration;
     }
+
+    bool isSmoothing() const noexcept { return remaining > 0; }
 
     double next() noexcept
     {
@@ -162,131 +169,182 @@ private:
     double z1 = 0.0, z2 = 0.0;
 };
 
-// Used by the desktop and browser EQ response displays. 0 dB excludes channel gain.
-inline double responseDb (const ChannelSettings& settings, double sampleRate, double frequencyHz) noexcept
+// A filter bank owns both its coefficients and its sample history.
+class FilterChain
 {
-    double magnitude = 1.0;
-    PeakBiquad stage;
-    const auto processCutoff = [&] (const CutoffSettings& cfg, bool hp)
+public:
+    bool update(const ChannelSettings& settings, double sampleRate) noexcept
     {
-        if (!cfg.enabled.load()) return;
-        const double f = cfg.frequencyHz.load();
-        const bool steep = cfg.slopeDbPerOct.load() == 24;
-        const double q0 = steep ? 0.5411961001462 : 0.7071067811865;
-        if (hp) stage.setHighPass(sampleRate, f, q0); else stage.setLowPass(sampleRate, f, q0);
-        magnitude *= stage.magnitudeAt(sampleRate, frequencyHz);
-        if (steep)
+        bool changed = false;
+        eqCount = 0;
+        for (std::size_t band = 0; band < filters.size(); ++band)
         {
-            if (hp) stage.setHighPass(sampleRate, f, 1.3065629648764);
-            else stage.setLowPass(sampleRate, f, 1.3065629648764);
-            magnitude *= stage.magnitudeAt(sampleRate, frequencyHz);
+            const auto& eq = settings.eq[band];
+            const std::array<double, 3> next { eq.frequencyHz.load(std::memory_order_relaxed),
+                                              eq.gainDb.load(std::memory_order_relaxed),
+                                              eq.q.load(std::memory_order_relaxed) };
+            if (next[1] != 0.0) activeEq[eqCount++] = band;
+            if (next == eqValues[band]) continue;
+            filters[band].setPeak(sampleRate, next[0], next[1], next[2]);
+            filters[band].reset();
+            eqValues[band] = next;
+            changed = true;
         }
-    };
-    processCutoff(settings.highPass, true);
-    for (const auto& eq : settings.eq)
-    {
-        stage.setPeak(sampleRate, eq.frequencyHz.load(), eq.gainDb.load(), eq.q.load());
-        magnitude *= stage.magnitudeAt(sampleRate, frequencyHz);
+        changed |= updateCutoff(settings.highPass, highPass, sampleRate, true);
+        changed |= updateCutoff(settings.lowPass, lowPass, sampleRate, false);
+        return changed;
     }
-    processCutoff(settings.lowPass, false);
-    return 20.0 * std::log10(std::max(1.0e-12, magnitude));
+
+    float process(float x) noexcept
+    {
+        for (int i = 0; i < highPass.count; ++i) x = highPass.stages[i].process(x);
+        for (std::size_t i = 0; i < eqCount; ++i) x = filters[activeEq[i]].process(x);
+        for (int i = 0; i < lowPass.count; ++i) x = lowPass.stages[i].process(x);
+        return x;
+    }
+
+    // The EQ graph represents filter gain only.
+    double responseDb(double sampleRate, double frequencyHz) const noexcept
+    {
+        double magnitude = 1.0;
+        for (int i = 0; i < highPass.count; ++i) magnitude *= highPass.stages[i].magnitudeAt(sampleRate, frequencyHz);
+        for (std::size_t i = 0; i < eqCount; ++i) magnitude *= filters[activeEq[i]].magnitudeAt(sampleRate, frequencyHz);
+        for (int i = 0; i < lowPass.count; ++i) magnitude *= lowPass.stages[i].magnitudeAt(sampleRate, frequencyHz);
+        return 20.0 * std::log10(std::max(1.0e-12, magnitude));
+    }
+
+private:
+    struct Cutoff
+    {
+        std::array<PeakBiquad, 2> stages;
+        double hz = 0.0;
+        int count = 0;
+    };
+
+    static bool updateCutoff(const CutoffSettings& settings, Cutoff& cutoff, double rate, bool high) noexcept
+    {
+        const int count = !settings.enabled.load(std::memory_order_relaxed) ? 0
+            : (settings.slopeDbPerOct.load(std::memory_order_relaxed) == 24 ? 2 : 1);
+        const double hz = settings.frequencyHz.load(std::memory_order_relaxed);
+        if (cutoff.count == count && (count == 0 || cutoff.hz == hz)) return false;
+        cutoff.hz = hz;
+        cutoff.count = count;
+        for (int i = 0; i < count; ++i)
+        {
+            auto& stage = cutoff.stages[i];
+            const double q = count == 1 ? 0.7071067811865 : (i == 0 ? 0.5411961001462 : 1.3065629648764);
+            if (high) stage.setHighPass(rate, hz, q);
+            else stage.setLowPass(rate, hz, q);
+            stage.reset();
+        }
+        return true;
+    }
+
+    std::array<PeakBiquad, kBands> filters;
+    std::array<std::array<double, 3>, kBands> eqValues {};
+    std::array<std::size_t, kBands> activeEq {};
+    std::size_t eqCount = 0;
+    Cutoff highPass, lowPass;
+};
+
+inline double responseDb(const ChannelSettings& settings, double sampleRate, double frequencyHz) noexcept
+{
+    FilterChain filters;
+    filters.update(settings, sampleRate);
+    return filters.responseDb(sampleRate, frequencyHz);
 }
 
 class MonoProcessor
 {
 public:
-    void prepare (double newSampleRate, bool initiallyMuted = false)
+    void prepare(double newSampleRate, const ChannelSettings& settings)
     {
         sampleRate = std::max(8000.0, newSampleRate);
-        delayBuffer.assign(static_cast<std::size_t>(std::ceil(sampleRate * kMaxDelayMs / 1000.0)) + 8, 0.0f);
+        delayBuffer.assign(static_cast<std::size_t>(std::ceil(sampleRate * kMaxDelayMs / 1000.0)) + 1, 0.0f);
         writeIndex = 0;
-        for (auto& filter : filters) filter.reset();
-        for (auto& filter : cutoffFilters) filter.reset();
-        lastCutoff = { -1, -1, -1, -1 };
-        for (auto& cached : oldValues) cached = { -1.0, -999.0, -1.0 };
-        gainRamp.prepare(sampleRate, 0.015, 1.0);
-        polarityRamp.prepare(sampleRate, 0.003, 1.0);
-        muteRamp.prepare(sampleRate, 0.006, initiallyMuted ? 0.0 : 1.0); // Click-free 6 ms mute/unmute.
-        delayRamp.prepare(sampleRate, 0.035, 0.0);
+        activeDelay = nextDelay = delaySamples(settings);
+        activeFilters = 0;
+        filters = {};
+        filters[activeFilters].update(settings, sampleRate);
+        gainRamp.prepare(sampleRate, 0.015, dbToGain(settings.levelDb.load()));
+        polarityRamp.prepare(sampleRate, 0.003, settings.invertPolarity.load() ? -1.0 : 1.0);
+        muteRamp.prepare(sampleRate, 0.006, settings.outputMuted.load() ? 0.0 : 1.0);
+        filterFade.prepare(sampleRate, 0.030, 1.0);
+        delayFade.prepare(sampleRate, 0.035, 1.0);
     }
 
-    // Called once per audio buffer. No allocations in the processing callback.
-    void beginBlock (const ChannelSettings& settings, bool forceUnmute = false) noexcept
+    // Finish the current transition before applying the latest request. This keeps
+    // rapid slider updates from interrupting a fade or resetting an audible filter.
+    void beginBlock(const ChannelSettings& settings, bool forceUnmute = false) noexcept
     {
-        for (int i = 0; i < kBands; ++i)
+        if (!filterFade.isSmoothing())
         {
-            const auto& band = settings.eq[static_cast<std::size_t>(i)];
-            const double freq = band.frequencyHz.load(std::memory_order_relaxed);
-            const double gain = band.gainDb.load(std::memory_order_relaxed);
-            const double q = band.q.load(std::memory_order_relaxed);
-            auto& previous = oldValues[static_cast<std::size_t>(i)];
-            if (previous[0] != freq || previous[1] != gain || previous[2] != q)
+            auto& next = filters[1 - activeFilters];
+            next = filters[activeFilters];
+            if (next.update(settings, sampleRate))
             {
-                filters[static_cast<std::size_t>(i)].setPeak(sampleRate, freq, gain, q);
-                previous = { freq, gain, q };
+                filterFade.prepare(sampleRate, 0.030, 0.0);
+                filterFade.setTarget(1.0);
             }
         }
-        // A 4th-order Butterworth cascade needs Q=0.541196 and 1.306563.
-        // For 12 dB/oct, use one Q=1/sqrt(2) stage instead.
-        for (int mode = 0; mode < 2; ++mode)
+        if (!delayFade.isSmoothing())
         {
-            const auto& filter = mode == 0 ? settings.highPass : settings.lowPass;
-            const double hz = std::clamp(filter.frequencyHz.load(std::memory_order_relaxed), 20.0, 20000.0);
-            const int slope = filter.slopeDbPerOct.load(std::memory_order_relaxed) == 24 ? 24 : 12;
-            auto& state = lastCutoff[static_cast<std::size_t>(mode)];
-            auto& stateSlope = lastCutoff[static_cast<std::size_t>(mode + 2)];
-            if (state != hz || stateSlope != slope)
+            nextDelay = delaySamples(settings);
+            if (nextDelay != activeDelay)
             {
-                auto& f0 = cutoffFilters[static_cast<std::size_t>(mode * 2)];
-                auto& f1 = cutoffFilters[static_cast<std::size_t>(mode * 2 + 1)];
-                const double q0 = slope == 24 ? 0.5411961001462 : 0.7071067811865;
-                const double q1 = 1.3065629648764;
-                if (mode == 0) { f0.setHighPass(sampleRate, hz, q0); f1.setHighPass(sampleRate, hz, q1); }
-                else { f0.setLowPass(sampleRate, hz, q0); f1.setLowPass(sampleRate, hz, q1); }
-                state = hz;
-                stateSlope = static_cast<double>(slope);
+                delayFade.prepare(sampleRate, 0.035, 0.0);
+                delayFade.setTarget(1.0);
             }
-            cutoffEnabled[static_cast<std::size_t>(mode)] = filter.enabled.load(std::memory_order_relaxed);
-            cutoffStages[static_cast<std::size_t>(mode)] = slope == 24 ? 2 : 1;
         }
         gainRamp.setTarget(dbToGain(settings.levelDb.load(std::memory_order_relaxed)));
         polarityRamp.setTarget(settings.invertPolarity.load(std::memory_order_relaxed) ? -1.0 : 1.0);
         muteRamp.setTarget(!forceUnmute && settings.outputMuted.load(std::memory_order_relaxed) ? 0.0 : 1.0);
-        delayRamp.setTarget(std::clamp(settings.delayMs.load(std::memory_order_relaxed), 0.0, kMaxDelayMs)
-                            * sampleRate / 1000.0);
     }
 
-    float process (float input) noexcept
+    float process(float input) noexcept
     {
-        float x = input;
-        if (cutoffEnabled[0])
-            for (int i = 0; i < cutoffStages[0]; ++i) x = cutoffFilters[static_cast<std::size_t>(i)].process(x);
-        for (auto& filter : filters) x = filter.process(x);
-        if (cutoffEnabled[1])
-            for (int i = 0; i < cutoffStages[1]; ++i) x = cutoffFilters[static_cast<std::size_t>(i + 2)].process(x);
+        float x = filters[activeFilters].process(input);
+        if (filterFade.isSmoothing())
+        {
+            const float next = filters[1 - activeFilters].process(input);
+            x = blend(x, next, filterFade.next());
+            if (!filterFade.isSmoothing()) activeFilters = 1 - activeFilters;
+        }
 
         delayBuffer[writeIndex] = x;
-        const double lag = delayRamp.next();
-        double readPosition = static_cast<double>(writeIndex) - lag;
-        if (readPosition < 0.0) readPosition += static_cast<double>(delayBuffer.size());
-        const auto earlier = static_cast<std::size_t>(readPosition);
-        const auto later = (earlier + 1) % delayBuffer.size();
-        const float fraction = static_cast<float>(readPosition - static_cast<double>(earlier));
-        const float delayed = delayBuffer[earlier] * (1.0f - fraction) + delayBuffer[later] * fraction;
-        writeIndex = (writeIndex + 1) % delayBuffer.size();
+        float delayed = readDelay(activeDelay);
+        if (delayFade.isSmoothing())
+        {
+            delayed = blend(delayed, readDelay(nextDelay), delayFade.next());
+            if (!delayFade.isSmoothing()) activeDelay = nextDelay;
+        }
+        if (++writeIndex == delayBuffer.size()) writeIndex = 0;
         return delayed * static_cast<float>(gainRamp.next() * polarityRamp.next() * muteRamp.next());
     }
 
 private:
+    static float blend(float a, float b, double amount) noexcept
+    {
+        return static_cast<float>((1.0 - amount) * a + amount * b);
+    }
+
+    std::size_t delaySamples(const ChannelSettings& settings) const noexcept
+    {
+        return static_cast<std::size_t>(std::round(normalizedDelayMs(settings.delayMs.load(std::memory_order_relaxed))
+                                                   * sampleRate / 1000.0));
+    }
+
+    float readDelay(std::size_t samples) const noexcept
+    {
+        const auto index = writeIndex >= samples ? writeIndex - samples : delayBuffer.size() - (samples - writeIndex);
+        return delayBuffer[index];
+    }
+
     double sampleRate = 48000.0;
-    std::array<PeakBiquad, kBands> filters;
-    std::array<PeakBiquad, 4> cutoffFilters;
-    std::array<double, 4> lastCutoff { -1, -1, -1, -1 };
-    std::array<bool, 2> cutoffEnabled { false, false };
-    std::array<int, 2> cutoffStages { 1, 1 };
-    std::array<std::array<double, 3>, kBands> oldValues {};
+    std::array<FilterChain, 2> filters;
+    std::size_t activeFilters = 0;
     std::vector<float> delayBuffer;
-    std::size_t writeIndex = 0;
-    ParameterRamp gainRamp, polarityRamp, delayRamp, muteRamp;
+    std::size_t writeIndex = 0, activeDelay = 0, nextDelay = 0;
+    ParameterRamp gainRamp, polarityRamp, muteRamp, filterFade, delayFade;
 };
 } // namespace dualdsp

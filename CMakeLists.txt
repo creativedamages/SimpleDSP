@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(HTDSP VERSION 0.3.1 LANGUAGES C CXX)
+project(SimpleDSP VERSION 0.4.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -11,8 +11,8 @@ FetchContent_Declare(juce
 )
 FetchContent_MakeAvailable(juce)
 
-juce_add_gui_app(HTDSP
-  PRODUCT_NAME "HT DSP"
+juce_add_gui_app(SimpleDSP
+  PRODUCT_NAME "SimpleDSP"
   COMPANY_NAME "RobbyApps"
   BUNDLE_ID "com.robbyapps.htdsp"
 )
@@ -22,25 +22,26 @@ juce_add_gui_app(HTDSP
 # such as bullet separators, disclosure arrows and degree symbols.
 # /utf-8 sets both source and execution character sets to UTF-8.
 if(MSVC)
-  target_compile_options(HTDSP PRIVATE /utf-8)
+  target_compile_options(SimpleDSP PRIVATE /utf-8)
 endif()
 
-target_sources(HTDSP PRIVATE Source/Main.cpp Source/DSP.h Source/Analysis.h Source/RemoteServer.h Source/RemotePage.h Source/ProjectSettings.h Source/TestSignal.h Source/SineSweep.h)
-target_compile_definitions(HTDSP PRIVATE
+target_sources(SimpleDSP PRIVATE Source/Main.cpp Source/DSP.h Source/Analysis.h Source/RemoteServer.h Source/RemotePage.h Source/ProjectSettings.h Source/TestSignal.h Source/SineSweep.h)
+target_compile_definitions(SimpleDSP PRIVATE
+  SIMPLEDSP_VERSION="${PROJECT_VERSION}"
   JUCE_ASIO=1
   JUCE_WASAPI=1
   JUCE_USE_WINDOWS_MIDI_SERVICES=0
   JUCE_USE_CURL=0
   JUCE_WEB_BROWSER=0
 )
-target_link_libraries(HTDSP PRIVATE
+target_link_libraries(SimpleDSP PRIVATE
   juce::juce_audio_utils
   juce::juce_gui_extra
   juce::juce_recommended_config_flags
   juce::juce_recommended_warning_flags
   juce::juce_recommended_lto_flags
 )
-juce_generate_juce_header(HTDSP)
+juce_generate_juce_header(SimpleDSP)
 
 include(CTest)
 if(BUILD_TESTING)

@@ -8,15 +8,15 @@
 
 int main()
 {
-    static_assert(htdsp::channelCount == 16);
+    static_assert(htdsp::channelCount == 2);
     std::array<int, htdsp::channelCount> routes;
     routes.fill(-1);
     routes[0] = 31;
-    routes[15] = 62;
+    routes[1] = 62;
     assert(htdsp::outputIsAssigned(routes, 0, 62));
-    assert(htdsp::outputIsAssigned(routes, 15, 31));
-    assert(!htdsp::outputIsAssigned(routes, 15, 62));
-    assert(!htdsp::outputIsAssigned(routes, 15, -1));
+    assert(htdsp::outputIsAssigned(routes, 1, 31));
+    assert(!htdsp::outputIsAssigned(routes, 1, 62));
+    assert(!htdsp::outputIsAssigned(routes, 1, -1));
 
 
     htdsp::TestSignalSettings testSettings;
@@ -84,6 +84,11 @@ int main()
     sweep.start(48000, -40);
     for (int n = 0; n < 100000; ++n) sweep.next();
     sweep.stop();
+    for (int n = 0; n < 480; ++n)
+    {
+        assert(std::abs(sweep.next()) <= 0.01001f);
+        assert(sweep.outputGain(false) == 0);
+    }
     int tailSamples = 0;
     while (sweep.running())
     {
@@ -96,11 +101,11 @@ int main()
     ChannelSettings settings;
     MonoProcessor processor;
     settings.outputMuted.store(true);
-    processor.prepare(48000.0, true);
+    processor.prepare(48000.0, settings);
     processor.beginBlock(settings);
     assert(processor.process(1.0f) == 0.0f);
     settings.outputMuted.store(false);
-    processor.prepare(48000.0);
+    processor.prepare(48000.0, settings);
     processor.beginBlock(settings);
     // A unity channel with flat PEQs and zero delay must pass samples unchanged.
     for (int n = 0; n < 1024; ++n)
@@ -115,9 +120,7 @@ int main()
 
     settings.invertPolarity.store(false);
     settings.delayMs.store(10.0);
-    processor.prepare(48000.0);
-    processor.beginBlock(settings);
-    for (int n = 0; n < 2500; ++n) processor.process(0.0f); // settle delay ramp
+    processor.prepare(48000.0, settings);
     processor.beginBlock(settings);
     float at479 = 0, at480 = 0;
     for (int n = 0; n < 1000; ++n)
@@ -129,12 +132,18 @@ int main()
     assert(std::abs(at479) < 1e-5f);
     assert(std::abs(at480 - 1.0f) < 1e-4f);
     // Delay requests beyond the supported range must be clamped by DSP.
-    static_assert(kMaxDelayMs == 500.0, "Delay ceiling must be 500 ms");
+    static_assert(kMaxDelayMs == 50.0);
     settings.delayMs.store(9999.0);
-    processor.prepare(48000.0);
+    processor.prepare(48000.0, settings);
     processor.beginBlock(settings);
-    // The ramp settles at no more than the 500 ms buffer length.
-    for (int n = 0; n < 26000; ++n) processor.process(0.0f);
+    for (int n = 0; n < 4800; ++n)
+        assert(processor.process(n == 0 ? 1.0f : 0.0f) == (n == 2400 ? 1.0f : 0.0f));
+    assert(normalizedDelayMs(10.01) == 10.0 && normalizedDelayMs(10.14) == 10.25);
+    settings.delayMs.store(10.25);
+    constexpr double rate = 44100;
+    processor.prepare(rate, settings);
+    for (int n = 0; n < 1000; ++n)
+        assert(processor.process(n == 0 ? 1.0f : 0.0f) == (n == 452 ? 1.0f : 0.0f));
     // The graph calculation must match the high/low-pass coefficients in the DSP.
     settings.delayMs.store(0.0);
     settings.invertPolarity.store(false);
@@ -163,7 +172,7 @@ int main()
     settings.highPass.frequencyHz.store(1000.0);
     settings.highPass.slopeDbPerOct.store(12);
     MonoProcessor highpass;
-    highpass.prepare(48000.0);
+    highpass.prepare(48000.0, settings);
     highpass.beginBlock(settings);
     double energy = 0.0;
     for (int n = 0; n < 48000; ++n)
@@ -178,7 +187,7 @@ int main()
     // of switching abruptly (to prevent clicks when used from a phone).
     ChannelSettings mutedSettings;
     MonoProcessor muteProcessor;
-    muteProcessor.prepare(48000.0);
+    muteProcessor.prepare(48000.0, mutedSettings);
     muteProcessor.beginBlock(mutedSettings);
     for (int n = 0; n < 400; ++n)
         assert(std::abs(muteProcessor.process(0.5f) - 0.5f) < 1e-4f);
@@ -192,6 +201,44 @@ int main()
     muteProcessor.beginBlock(mutedSettings);
     for (int n = 0; n < 400; ++n) muteProcessor.process(0.5f);
     assert(std::abs(muteProcessor.process(0.5f) - 0.5f) < 1e-4f);
-    std::cout << "DSP passthrough, polarity, delay, filters and click-free mute passed.\\n";
+    // A large live retune previously reused the old filter state and exceeded full scale.
+    ChannelSettings retuned;
+    retuned.lowPass.enabled = true;
+    retuned.lowPass.frequencyHz = 1000.0;
+    MonoProcessor lowpass;
+    lowpass.prepare(48000.0, retuned);
+    float peak = 0.0f;
+    double tailPower = 0.0;
+    for (int n = 0; n < 96000; ++n)
+    {
+        if (n == 48000) { retuned.lowPass.frequencyHz = 20.0; lowpass.beginBlock(retuned); }
+        const auto input = static_cast<float>(0.1 * std::sin(2 * kPi * 100.0 * n / 48000.0 + 0.6));
+        const auto output = lowpass.process(input);
+        peak = std::max(peak, std::abs(output));
+        if (n >= 72000) tailPower += output * output;
+    }
+    assert(peak < 0.12f);
+    assert(std::abs(std::sqrt(tailPower / 24000) - 0.002826) < 0.00005);
 
+    // Test excitation must wait for the live outputs to fade, then leave time
+    // for the longest delay to drain before those outputs return.
+    htdsp::GeneratorIsolation isolation;
+    isolation.prepare(48000);
+    assert(isolation.next() == 1.0f);
+    isolation.beginBlock(true);
+    for (int n = 0; n < 479; ++n)
+    {
+        const auto gate = isolation.next();
+        assert(gate > 0.0f && gate < 1.0f);
+    }
+    assert(isolation.next() == 0.0f);
+    isolation.beginBlock(false);
+    for (int n = 0; n < 2879; ++n) assert(isolation.next() == 0.0f);
+    for (int n = 0; n < 479; ++n)
+    {
+        const auto gate = isolation.next();
+        assert(gate > 0.0f && gate < 1.0f);
+    }
+    assert(isolation.next() == 1.0f);
+    std::cout << "DSP routing, filters, delay, mute, generator isolation and sweep passed.\n";
 }

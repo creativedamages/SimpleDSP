@@ -15,6 +15,10 @@ constexpr int kRtaFftSize = 16384;
 constexpr int kRtaRingSize = 32768;
 constexpr int kRtaBins = 128;
 constexpr double kMeterFloorDb = -96.0;
+inline double rtaMaxHz(double sampleRate) noexcept
+{
+    return std::min(20000.0, std::max(8000.0, sampleRate) * 0.49);
+}
 static_assert(std::atomic<float>::is_always_lock_free && std::atomic<std::uint64_t>::is_always_lock_free,
               "The audio monitoring path requires lock-free atomic writes");
 
@@ -34,6 +38,65 @@ struct LiveLevels
     bool outputClip = false;
 };
 
+// Meter-only 4x interpolation. The audio buffer never passes through this FIR.
+class TruePeakMeter
+{
+public:
+    void reset() noexcept
+    {
+        history.fill(0.0f);
+        position = 0;
+        historyRemaining = 0;
+    }
+
+    float process(float sample) noexcept
+    {
+        if (sample != 0.0f) historyRemaining = taps;
+        else if (historyRemaining == 0) return 0.0f;
+        else --historyRemaining;
+
+        history[position] = history[position + taps] = sample;
+        const auto* newest = history.data() + position;
+        if (position == 0) position = taps;
+        --position;
+        float peak = std::abs(sample);
+        for (const auto& phase : coefficients)
+        {
+            float value = 0.0f;
+            for (int i = 0; i < taps; ++i) value += newest[i] * phase[i];
+            peak = std::max(peak, std::abs(value));
+        }
+        return peak;
+    }
+
+private:
+    static constexpr int taps = 32;
+    static constexpr double pi = 3.14159265358979323846;
+    inline static const auto coefficients = []
+    {
+        std::array<std::array<float, taps>, 3> bank {};
+        for (std::size_t phase = 0; phase < bank.size(); ++phase)
+        {
+            const double delay = 15.0 + (phase + 1) * 0.25;
+            double sum = 0.0;
+            for (int i = 0; i < taps; ++i)
+            {
+                const double offset = i - delay;
+                const double window = 0.42 + 0.5 * std::cos(2.0 * pi * offset / taps)
+                    + 0.08 * std::cos(4.0 * pi * offset / taps);
+                const double value = window * std::sin(pi * offset) / (pi * offset);
+                bank[phase][i] = static_cast<float>(value);
+                sum += value;
+            }
+            for (auto& value : bank[phase]) value = static_cast<float>(value / sum);
+        }
+        return bank;
+    }();
+    std::array<float, 2 * taps> history {};
+    std::size_t position = 0;
+    int historyRemaining = 0;
+};
+
 class AudioTelemetry
 {
 public:
@@ -46,6 +109,7 @@ public:
     {
         sampleRate = std::max(8000.0, newSampleRate); // audio callback thread only
         writePosition = 0;
+        outputPeakMeter.reset();
         publishedPosition.store(0, std::memory_order_release);
         for (auto& v : inputRing) v.store(0.0f, std::memory_order_relaxed);
         for (auto& v : outputRing) v.store(0.0f, std::memory_order_relaxed);
@@ -62,12 +126,13 @@ public:
         if (count <= 0) return;
         float peaks[2] { 0.0f, 0.0f };
         double square[2] { 0.0, 0.0 };
+        if (output == nullptr) outputPeakMeter.reset();
         for (int i = 0; i < count; ++i)
         {
             const float a = input != nullptr ? input[i] : 0.0f;
             const float b = output != nullptr ? output[i] : 0.0f;
             peaks[0] = std::max(peaks[0], std::abs(a));
-            peaks[1] = std::max(peaks[1], std::abs(b));
+            if (output != nullptr) peaks[1] = std::max(peaks[1], outputPeakMeter.process(b));
             square[0] += static_cast<double>(a) * a;
             square[1] += static_cast<double>(b) * b;
             inputRing[static_cast<std::size_t>(writePosition % kRtaRingSize)]
@@ -128,6 +193,7 @@ private:
     std::array<std::atomic<float>, 2> rmsPower {};
     std::array<double, 2> rmsState { 0.0, 0.0 };
     std::atomic<bool> inputClipped { false }, outputClipped { false };
+    TruePeakMeter outputPeakMeter;
 };
 
 class SpectrumAnalyzer
@@ -142,38 +208,29 @@ public:
             for (auto& d : bins) d = std::max(static_cast<float>(kMeterFloorDb), d - 5.0f);
             return;
         }
+        // Apply the shared Hann window and bit reversal in one pass.
+        const auto& lookup = fftLookup();
         for (int i = 0; i < kRtaFftSize; ++i)
-        {
-            const auto window = 0.5 - 0.5 * std::cos(2.0 * 3.14159265358979323846 * i / (kRtaFftSize - 1));
-            spectrum[static_cast<std::size_t>(i)] = std::complex<double>(samples[static_cast<std::size_t>(i)] * window, 0.0);
-        }
-        // Fixed-size radix-2 FFT. Runs on the message thread, not the audio callback.
-        for (int i = 1, j = 0; i < kRtaFftSize; ++i)
-        {
-            int bit = kRtaFftSize >> 1;
-            for (; j & bit; bit >>= 1) j ^= bit;
-            j ^= bit;
-            if (i < j) std::swap(spectrum[static_cast<std::size_t>(i)], spectrum[static_cast<std::size_t>(j)]);
-        }
+            spectrum[lookup.reversed[i]] = {samples[i] * lookup.window[i], 0.0};
+
+        // Fixed-size radix-2 FFT. Runs on the message thread.
+
         for (int length = 2; length <= kRtaFftSize; length <<= 1)
         {
-            const auto angle = -2.0 * 3.14159265358979323846 / length;
-            const std::complex<double> step(std::cos(angle), std::sin(angle));
+            const int stride = kRtaFftSize / length;
             for (int start = 0; start < kRtaFftSize; start += length)
             {
-                std::complex<double> w(1.0, 0.0);
                 for (int j = 0; j < length / 2; ++j)
                 {
                     const auto u = spectrum[static_cast<std::size_t>(start+j)];
-                    const auto v = spectrum[static_cast<std::size_t>(start+j+length/2)] * w;
+                    const auto v = spectrum[static_cast<std::size_t>(start+j+length/2)] * lookup.twiddles[j * stride];
                     spectrum[static_cast<std::size_t>(start+j)] = u + v;
                     spectrum[static_cast<std::size_t>(start+j+length/2)] = u - v;
-                    w *= step;
                 }
             }
         }
         const auto frequencyPerBin = std::max(8000.0, sampleRate) / kRtaFftSize;
-        const double lastFrequency = std::min(20000.0, sampleRate * 0.49);
+        const double lastFrequency = rtaMaxHz(sampleRate);
         for (int index = 0; index < kRtaBins; ++index)
         {
             const double hz = 20.0 * std::pow(lastFrequency / 20.0, static_cast<double>(index) / (kRtaBins - 1));
@@ -193,9 +250,10 @@ public:
             const double halfBandwidth = std::max(frequencyPerBin, hz * 0.030);
             const int start = std::clamp(static_cast<int>(std::ceil((hz - halfBandwidth) / frequencyPerBin)), 1, kRtaFftSize/2-1);
             const int stop = std::clamp(static_cast<int>(std::floor((hz + halfBandwidth) / frequencyPerBin)), start, kRtaFftSize/2-1);
-            double localPeak = interpolated;
+            double localPeakSquared = 0.0;
             for (int k = start; k <= stop; ++k)
-                localPeak = std::max(localPeak, std::abs(spectrum[static_cast<std::size_t>(k)]));
+                localPeakSquared = std::max(localPeakSquared, std::norm(spectrum[static_cast<std::size_t>(k)]));
+            const double localPeak = std::max(interpolated, std::sqrt(localPeakSquared));
             // Fractional-bin interpolation dominates in the bass, avoiding
             // repeated-bin flat steps. Blend back to peak buckets above 80Hz
             // for useful narrow-band detection at mid/high frequencies.
@@ -208,6 +266,36 @@ public:
     }
     const std::array<float, kRtaBins>& getBins() const noexcept { return bins; }
 private:
+    struct FftLookup
+    {
+        FftLookup()
+        {
+            constexpr double tau = 6.28318530717958647692;
+            for (int i = 0, j = 0; i < kRtaFftSize; ++i)
+            {
+                window[i] = 0.5 - 0.5 * std::cos(tau * i / (kRtaFftSize - 1));
+                reversed[i] = j;
+                int bit = kRtaFftSize >> 1;
+                for (; j & bit; bit >>= 1) j ^= bit;
+                j ^= bit;
+            }
+            for (int i = 0; i < kRtaFftSize / 2; ++i)
+            {
+                const double angle = -tau * i / kRtaFftSize;
+                twiddles[i] = {std::cos(angle), std::sin(angle)};
+            }
+        }
+        std::array<double, kRtaFftSize> window {};
+        std::array<int, kRtaFftSize> reversed {};
+        std::array<std::complex<double>, kRtaFftSize / 2> twiddles {};
+    };
+
+    static const FftLookup& fftLookup()
+    {
+        static const FftLookup lookup;
+        return lookup;
+    }
+
     std::array<std::complex<double>, kRtaFftSize> spectrum {};
     std::array<float, kRtaBins> bins {};
 };

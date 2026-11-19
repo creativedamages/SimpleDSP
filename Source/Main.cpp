@@ -17,7 +17,7 @@
 // Catch a future build that forgets the UTF-8 compiler setting. JUCE uses
 // UTF-8 for its narrow string literals in labels, menu items, and buttons.
 static_assert(sizeof("\u2022") == 4 && sizeof("▼") == 4,
-              "HT DSP requires UTF-8 source and execution charsets (/utf-8 on MSVC).");
+              "SimpleDSP requires UTF-8 source and execution charsets (/utf-8 on MSVC).");
 
 namespace
 {
@@ -80,10 +80,17 @@ public:
         sweepRate = sampleRate;
         restoreGain = 1.0f;
         generator.prepare(sampleRate);
-        sourceBlend.fill(0.0f);
+        const bool generatorOn = testSettings.enabled.load();
+        isolation.prepare(sampleRate, generatorOn);
+        for (int ch = 0; ch < htdsp::channelCount; ++ch)
+        {
+            const bool selected = testInputs[ch].load();
+            lastNormalGate[ch] = !generatorOn || selected ? 1.0f : 0.0f;
+            sourceBlend[ch] = selected ? 1.0f : 0.0f;
+        }
         blendStep = static_cast<float>(1.0 / (sampleRate * 0.01));
         for (int ch = 0; ch < htdsp::channelCount; ++ch)
-            processors[ch].prepare(sampleRate, parameters[ch].outputMuted.load());
+            processors[ch].prepare(sampleRate, parameters[ch]);
         for (auto& meter : telemetry) meter.prepare(sampleRate);
 
         // JUCE's callback arrays are packed in active-channel order, even when
@@ -130,25 +137,32 @@ public:
                 juce::FloatVectorOperations::clear(outputData[output], numSamples);
 
         if (sweepPending.exchange(false))
+        {
             sweep.start(sweepRate, testSettings.levelDb.load());
+            sweepEntryGate = lastNormalGate;
+        }
         sweep.setLevel(testSettings.levelDb.load());
         const int sweptChannel = sweepChannel.load();
         if (sweepStop.exchange(false)) sweep.stop();
         const bool sweeping = sweptChannel >= 0;
         const bool generatorOn = testSettings.enabled.load();
         generator.beginBlock(testSettings);
+        isolation.beginBlock(generatorOn);
         for (int path = 0; path < htdsp::channelCount; ++path)
-            processors[path].beginBlock(parameters[path], sweeping && path == sweptChannel);
-        std::array<float, 256> generated {}, selectedInput {}, sweepInput {}, selectedGate {}, otherGate {}, restore {};
+            processors[path].beginBlock(parameters[path], sweeping && path == sweptChannel && sweep.allowsUnmute());
+        std::array<float, 256> generated {}, selectedInput {}, liveGate {}, sweepInput {}, sweepLive {},
+                               selectedGate {}, otherGate {}, restore {};
         for (int offset = 0; offset < numSamples; offset += 256)
         {
             const int count = std::min(256, numSamples - offset);
             for (int n = 0; n < count; ++n)
             {
-                generated[n] = generator.next();
-                sweepInput[n] = sweeping ? sweep.next() : 0.0f;
+                liveGate[n] = isolation.next();
+                generated[n] = generator.next(generatorOn && liveGate[n] == 0.0f);
+                sweepLive[n] = sweeping ? sweep.liveInputGain() : 0.0f;
                 selectedGate[n] = sweeping ? sweep.outputGain(true) : 1.0f;
                 otherGate[n] = sweeping ? sweep.outputGain(false) : 1.0f;
+                sweepInput[n] = sweeping ? sweep.next() : 0.0f;
                 if (sweeping) restoreGain = 0.0f;
                 else restoreGain = std::min(1.0f, restoreGain + blendStep);
                 restore[n] = restoreGain;
@@ -162,7 +176,6 @@ public:
                 float* destination = output >= 0 && output < outputCount && outputData[output]
                     ? outputData[output] + offset : nullptr;
                 const bool testSelected = testInputs[path].load();
-                const bool generatorMuted = generatorOn && !testSelected;
                 const float target = testSelected ? 1.0f : 0.0f;
                 for (int n = 0; n < count; ++n)
                 {
@@ -170,11 +183,20 @@ public:
                     blend += std::clamp(target - blend, -blendStep, blendStep);
                     const float live = source ? source[n] : 0.0f;
                     selectedInput[n] = live * (1.0f - blend) + generated[n] * blend;
-                    if (sweeping && path == sweptChannel) selectedInput[n] = sweepInput[n];
+                    if (sweeping && path == sweptChannel)
+                        selectedInput[n] = selectedInput[n] * sweepLive[n] + sweepInput[n];
                     const float processed = processors[path].process(selectedInput[n]);
-                    const float gate = sweeping
-                        ? (path == sweptChannel ? selectedGate[n] : otherGate[n])
-                        : (generatorMuted ? 0.0f : restore[n]);
+                    float gate;
+                    if (sweeping)
+                    {
+                        gate = path == sweptChannel ? selectedGate[n] : otherGate[n];
+                        if (sweepLive[n] > 0.0f) gate *= sweepEntryGate[path];
+                    }
+                    else
+                    {
+                        gate = (testSelected ? 1.0f : liveGate[n]) * restore[n];
+                        lastNormalGate[path] = gate;
+                    }
                     const float result = processed * gate;
                     if (destination) destination[n] = result;
                 }
@@ -198,7 +220,8 @@ private:
     double sweepRate = 48000;
     float restoreGain = 1.0f;
     htdsp::TestSignalGenerator generator;
-    std::array<float, htdsp::channelCount> sourceBlend {};
+    htdsp::GeneratorIsolation isolation;
+    std::array<float, htdsp::channelCount> sourceBlend {}, lastNormalGate {}, sweepEntryGate {};
     float blendStep = 0.002f;
     std::array<dualdsp::MonoProcessor, htdsp::channelCount> processors;
     std::array<std::atomic<int>, htdsp::channelCount> callbackInputs {}, callbackOutputs {};
@@ -316,9 +339,9 @@ public:
         g.fillRoundedRectangle(getLocalBounds().toFloat(), 7);
         g.setFont(11.0f);
         g.setColour(mutedColour);
-        g.drawText("SIGNAL (dBFS)", 10, 2, 130, 14, juce::Justification::centredLeft);
+        g.drawText("INPUT SAMPLE PEAK  /  OUTPUT TRUE PEAK", 10, 2, 300, 14, juce::Justification::centredLeft);
         drawMeter(g, 19, "IN", values.inputPeak, values.inputRms, values.inputClip, inputSignalColour);
-        drawMeter(g, 38, "OUT", values.outputPeak, values.outputRms, values.outputClip, outputSignalColour);
+        drawMeter(g, 38, "OUT", values.outputPeak, values.outputRms, values.outputClip, outputSignalColour, " dBTP");
     }
     std::function<void(bool)> onClearClip;
     void mouseUp(const juce::MouseEvent& event) override
@@ -328,7 +351,7 @@ public:
     }
 private:
     void drawMeter(juce::Graphics& g, int y, const juce::String& label,
-                   float peak, float rms, bool clipped, juce::Colour colour)
+                   float peak, float rms, bool clipped, juce::Colour colour, const char* unit = " dBFS")
     {
         const float left = 48.0f, width = std::max(40.0f, static_cast<float>(getWidth()) - 170.0f);
         const auto position = [width](float db)
@@ -344,7 +367,7 @@ private:
         g.setColour(peak >= -0.1f ? juce::Colours::red : colour.brighter(0.45f));
         g.fillRect(left + position(peak), static_cast<float>(y) - 1.0f, 3.0f, 14.0f);
         g.setColour(peak >= -0.1f ? juce::Colours::red : juce::Colours::white);
-        g.drawText(juce::String(peak, 1) + " dB", getWidth() - 114, y - 2, 69, 17,
+        g.drawText(juce::String(peak, 1) + unit, getWidth() - 114, y - 2, 69, 17,
                    juce::Justification::centredRight);
         g.setColour(clipped ? juce::Colour(0xffde3558) : juce::Colour(0xff34485a));
         g.fillRoundedRectangle(static_cast<float>(getWidth() - 44), static_cast<float>(y - 2), 40.0f, 17.0f, 3.0f);
@@ -415,14 +438,14 @@ public:
             juce::Path trace;
             for (int index = 0; index < dualdsp::kRtaBins; ++index)
             {
-                const auto hz = 20.0 * std::pow(1000.0,
+                const auto hz = 20.0 * std::pow(dualdsp::rtaMaxHz(sampleRate) / 20.0,
                     static_cast<double>(index) / (dualdsp::kRtaBins - 1));
                 const auto x = fx(hz);
                 if (index == 0) trace.startNewSubPath(x, rtaY(bins[static_cast<std::size_t>(index)]));
                 else trace.lineTo(x, rtaY(bins[static_cast<std::size_t>(index)]));
             }
             auto area = trace;
-            area.lineTo(chart.getRight(), chart.getBottom());
+            area.lineTo(fx(dualdsp::rtaMaxHz(sampleRate)), chart.getBottom());
             area.lineTo(chart.getX(), chart.getBottom());
             area.closeSubPath();
             g.setColour(colour.withAlpha(fillAlpha));
@@ -447,12 +470,14 @@ public:
                    static_cast<int>(chart.getBottom()) - 6, 35, 13, juce::Justification::left);
         g.drawText("RTA dBFS", static_cast<int>(chart.getRight()) - 60,
                    2, 92, 13, juce::Justification::centredRight);
+        dualdsp::FilterChain filters;
+        filters.update(params, sampleRate);
         juce::Path response;
         for (int i = 0; i <= 220; ++i)
         {
             const double hz = 20.0 * std::pow(1000.0, i / 220.0);
             const auto x = fx(hz);
-            const auto y = fy(dualdsp::responseDb(params, sampleRate, hz));
+            const auto y = fy(filters.responseDb(sampleRate, hz));
             if (i == 0) response.startNewSubPath(x, y);
             else response.lineTo(x, y);
         }
@@ -539,7 +564,7 @@ public:
             addAndMakeVisible(*label);
         }
         setupSlider(level, -90.0, 18.0, 0.1, params.levelDb.load(), " dB");
-        setupSlider(delay, 0.0, dualdsp::kMaxDelayMs, 0.01, params.delayMs.load(), " ms");
+        setupSlider(delay, 0.0, dualdsp::kMaxDelayMs, dualdsp::kDelayStepMs, params.delayMs.load(), " ms");
         addAndMakeVisible(level);
         addAndMakeVisible(delay);
         level.onValueChange = [this] { params.levelDb.store(level.getValue()); };
@@ -832,10 +857,10 @@ public:
         addAndMakeVisible(generatorLevel);
         addAndMakeVisible(generatorFrequency);
 
-        title.setText("HT DSP", juce::dontSendNotification);
+        title.setText("SimpleDSP", juce::dontSendNotification);
         title.setFont(juce::Font(juce::FontOptions(28.0f, juce::Font::bold)));
         title.setColour(juce::Label::textColourId, juce::Colours::white);
-        subtitle.setText("16 independent mono channels", juce::dontSendNotification);
+        subtitle.setText("Two independent mono channels", juce::dontSendNotification);
         subtitle.setColour(juce::Label::textColourId, mutedColour);
         deviceLabel.setText("AUDIO INTERFACE", juce::dontSendNotification);
         deviceLabel.setColour(juce::Label::textColourId, accentColour);
@@ -1105,7 +1130,6 @@ private:
     std::array<int, htdsp::channelCount> lastValidInput, lastValidOutput;
     bool suppressUpdates = false;
     mutable std::atomic<unsigned int> requestedSpectra { 0 };
-    int nextRemoteSpectrum = 0;
 
     static juce::File appFolder()
     {
@@ -1176,8 +1200,7 @@ private:
     {
         if (!file.existsAsFile() || file.getSize() > htdsp::maxPresetBytes) return false;
         const auto parsed = juce::JSON::parse(file.loadFileAsString());
-        const auto v = parsed.getProperty("channels", {});
-        if (!htdsp::hasValidChannels(v)) return false;
+        if (!htdsp::hasValidPreset(parsed)) return false;
         const auto previousFile = startupFile;
         const auto previousLoad = launchPreset;
         startupFile = file.getFullPathName();
@@ -1274,22 +1297,8 @@ private:
         const auto rate = graphSampleRate.load();
         strips[selected].setGraphSampleRate(rate);
 
-        // Meter every channel. Run FFTs for the visible strip and up to
-        // two remote-requested channels per tick, with fair scheduling.
-        auto requests = requestedSpectra.exchange(0) & ~(1u << selected);
-        std::bitset<htdsp::channelCount> analyze;
-        analyze.set(selected);
-        int remoteBudget = 2;
-        for (int offset = 0; offset < htdsp::channelCount && remoteBudget > 0; ++offset)
-        {
-            const int channel = (nextRemoteSpectrum + offset) % htdsp::channelCount;
-            if ((requests & (1u << channel)) == 0) continue;
-            analyze.set(channel);
-            requests &= ~(1u << channel);
-            --remoteBudget;
-        }
-        nextRemoteSpectrum = (nextRemoteSpectrum + 2) % htdsp::channelCount;
-        if (requests != 0) requestedSpectra.fetch_or(requests);
+        // Compute spectra for the visible strip and any strip a phone is viewing.
+        const std::bitset<htdsp::channelCount> analyze(requestedSpectra.exchange(0) | (1u << selected));
 
         for (int ch = 0; ch < htdsp::channelCount; ++ch)
         {
@@ -1482,7 +1491,8 @@ private:
     juce::var snapshot(bool includeCurves) const
     {
         auto root = std::make_unique<juce::DynamicObject>();
-        root->setProperty("version", 1);
+        root->setProperty("version", htdsp::presetVersion);
+        root->setProperty("product", htdsp::presetProduct);
         if (includeCurves)
         {
             auto test = std::make_unique<juce::DynamicObject>();
@@ -1518,6 +1528,7 @@ private:
         root->setProperty("inputs", juce::var(ins));
         root->setProperty("outputs", juce::var(outs));
         const auto sr = graphSampleRate.load();
+        if (includeCurves) root->setProperty("rtaMaxHz", dualdsp::rtaMaxHz(sr));
         for (int i = 0; i < htdsp::channelCount; ++i)
         {
             const auto& p = engine.parameters[static_cast<std::size_t>(i)];
@@ -1552,8 +1563,10 @@ private:
             c->setProperty("lowPass", cutoff(p.lowPass));
             if (includeCurves)
             {
+                dualdsp::FilterChain filters;
+                filters.update(p, sr);
                 for (int n = 0; n < 128; ++n)
-                    curve.add(dualdsp::responseDb(p, sr, 20.0 * std::pow(1000.0, n / 127.0)));
+                    curve.add(filters.responseDb(sr, 20.0 * std::pow(1000.0, n / 127.0)));
                 c->setProperty("curve", juce::var(curve));
             }
             channels.add(juce::var(c.release()));
@@ -1594,8 +1607,8 @@ private:
 
     bool applySnapshot(const juce::var& state)
     {
+        if (!htdsp::hasValidPreset(state)) return false;
         const auto v = state.getProperty("channels", {});
-        if (!htdsp::hasValidChannels(v)) return false;
         std::array<int, htdsp::channelCount> pendingInput, pendingOutput;
         pendingInput.fill(-1);
         pendingOutput.fill(-1);
@@ -1607,7 +1620,7 @@ private:
             auto& p = engine.parameters[idx];
             setName(ch, c.getProperty("name", juce::String("Channel ") + juce::String(ch+1)).toString());
             p.levelDb.store(std::clamp(static_cast<double>(c.getProperty("levelDb", 0.0)), -90.0, 18.0));
-            p.delayMs.store(std::clamp(static_cast<double>(c.getProperty("delayMs", 0.0)), 0.0, dualdsp::kMaxDelayMs));
+            p.delayMs.store(dualdsp::normalizedDelayMs(static_cast<double>(c.getProperty("delayMs", 0.0))));
             p.invertPolarity.store(static_cast<bool>(c.getProperty("invertPolarity", false)));
             // Older presets lack outputMuted. Preserve a current safety mute
             // instead of unexpectedly opening an output during import.
@@ -1698,7 +1711,7 @@ private:
         }
         else if (key == "name") setName(ch, value.toString());
         else if (key == "levelDb") p.levelDb.store(std::clamp(numerical, -90.0, 18.0));
-        else if (key == "delayMs") p.delayMs.store(std::clamp(numerical, 0.0, dualdsp::kMaxDelayMs));
+        else if (key == "delayMs") p.delayMs.store(dualdsp::normalizedDelayMs(numerical));
         else if (key == "invertPolarity") p.invertPolarity.store(static_cast<bool>(value));
         else if (key == "outputMuted") p.outputMuted.store(static_cast<bool>(value));
         else if (key == "clearInputClip") engine.telemetry[index].clearClip(true);
@@ -1732,11 +1745,11 @@ private:
     }
 };
 
-class HTDSPApp final : public juce::JUCEApplication
+class SimpleDSPApp final : public juce::JUCEApplication
 {
 public:
-    const juce::String getApplicationName() override { return "HT DSP"; }
-    const juce::String getApplicationVersion() override { return "0.3.1"; }
+    const juce::String getApplicationName() override { return "SimpleDSP"; }
+    const juce::String getApplicationVersion() override { return SIMPLEDSP_VERSION; }
     bool moreThanOneInstanceAllowed() override { return false; }
 
     void initialise(const juce::String&) override
@@ -1766,7 +1779,7 @@ private:
     {
     public:
         MainWindow()
-            : juce::DocumentWindow("HT DSP", backgroundColour,
+            : juce::DocumentWindow("SimpleDSP", backgroundColour,
                                    juce::DocumentWindow::allButtons)
         {
             setUsingNativeTitleBar(true);
@@ -1786,4 +1799,4 @@ private:
 };
 } // namespace
 
-START_JUCE_APPLICATION(HTDSPApp)
+START_JUCE_APPLICATION(SimpleDSPApp)
