@@ -24,11 +24,22 @@ bool hasValidPreset(const Value& preset)
     const auto channels = preset.getProperty("channels", {});
     const auto* entries = channels.getArray();
     if (entries == nullptr) return false;
-    const int version = static_cast<int>(preset.getProperty("version", 0));
-    const bool current = version == presetVersion && entries->size() == channelCount
-        && preset.getProperty("product", {}).toString() == presetProduct;
-    const bool legacy = version == 1 && entries->size() == 16;
-    if (!current && !legacy) return false;
+    const auto versionField = preset.getProperty("version", {});
+    if (!versionField.isInt() && !versionField.isInt64()) return false;
+    const auto version = static_cast<long long>(versionField);
+    if (preset.hasProperty("product"))
+    {
+        if (version != presetVersion || entries->size() != channelCount
+            || preset.getProperty("product", {}).toString() != presetProduct)
+            return false;
+    }
+    else
+    {
+        // The original SimpleDSP exported two channels as v2 without a product tag.
+        // HT DSP exported 16 channels as v1, also without a tag.
+        if (!((version == 2 && entries->size() == 2) || (version == 1 && entries->size() == 16)))
+            return false;
+    }
     for (const auto& channel : *entries)
         if (!channel.isObject()) return false;
     return true;

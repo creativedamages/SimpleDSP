@@ -6,7 +6,7 @@ Each channel has six parametric EQ bands, high- and low-pass filters, 0–50 ms 
 
 Use the phone URL shown in the Windows window for LAN control. SimpleDSP uses TCP port 8766 and requires its own PIN by default. Windows and each remote can select their channels independently. RTA calculations focus on the channels being viewed. On the phone, the two channel buttons sit above the meters and spectrum. Tap EQ, Input, or Output to show or hide a trace. Freeze RTA holds the spectrum while the meters continue to update.
 
-SimpleDSP saves two-channel `.dsp.json` presets and can load a preset at launch. When loading a version 1 HT DSP preset, it uses channels 1 and 2 and rounds and clamps their delay values to the new range. The saved file retains all 16 channels until it is overwritten. Use a new preset name to keep the 16-channel original. The app stores its settings under `RobbyApps/HTDSP` in the Windows user application-data directory. Its Start with Windows option runs it at sign-in. Presets from the original app on the repository’s main branch use a separate format.
+SimpleDSP saves two-channel `.dsp.json` presets and can load a preset at launch. When loading a version 1 HT DSP preset, it uses channels 1 and 2 and rounds and clamps their delay values to the new range. The saved file retains all 16 channels until it is overwritten. Use a new preset name to keep the 16-channel original. The app stores its settings under `RobbyApps/HTDSP` in the Windows user application-data directory. Its Start with Windows option runs it at sign-in. Version 2 exports from the original two-channel SimpleDSP also load directly. Saved routes are applied when the selected audio device matches the one recorded in the preset.
 
 ## Build
 

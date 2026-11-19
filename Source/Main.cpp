@@ -1278,14 +1278,15 @@ private:
             if (notify) info.setText("Preset not found or too large.", juce::dontSendNotification);
             return false;
         }
-        const auto parsed = juce::JSON::parse(file.loadFileAsString());
-        if (!applySnapshot(parsed))
+        juce::var parsed;
+        if (juce::JSON::parse(file.loadFileAsString(), parsed).failed())
         {
-            if (notify) info.setText("Could not read preset format.", juce::dontSendNotification);
+            if (notify) info.setText("Preset file contains invalid JSON.", juce::dontSendNotification);
             return false;
         }
-        if (notify) info.setText("Preset loaded: " + file.getFileName(), juce::dontSendNotification);
-        return true;
+        if (applySnapshot(parsed, notify ? file.getFileName() : juce::String{})) return true;
+        if (notify) info.setText("Unsupported preset format.", juce::dontSendNotification);
+        return false;
     }
 
     void timerCallback() override
@@ -1605,7 +1606,7 @@ private:
     juce::String getStateJson() const { return juce::JSON::toString(snapshot(true), true); }
     juce::String getPresetJson() const { return juce::JSON::toString(snapshot(false), true); }
 
-    bool applySnapshot(const juce::var& state)
+    bool applySnapshot(const juce::var& state, const juce::String& filename = {})
     {
         if (!htdsp::hasValidPreset(state)) return false;
         const auto v = state.getProperty("channels", {});
@@ -1661,9 +1662,11 @@ private:
             strips[ch].setOutputRoute(pendingOutput[ch]);
         }
         suppressUpdates = false;
-        publishRoutes(); applyActivePorts(); syncStrips();
         if (!matchingDevice)
             info.setText("Preset DSP loaded. Routes left unassigned (different audio interface).", juce::dontSendNotification);
+        else if (filename.isNotEmpty())
+            info.setText("Preset loaded: " + filename, juce::dontSendNotification);
+        publishRoutes(); applyActivePorts(); syncStrips();
         return true;
     }
     void handleRemote(const juce::var& command)

@@ -216,7 +216,7 @@ private:
         if (file.getSize() > htdsp::maxPresetBytes) { send(client, 400, jsonError("Preset too large"), "application/json"); return; }
         const auto loaded = juce::JSON::parse(file.loadFileAsString());
         if (!htdsp::hasValidPreset(loaded))
-        { send(client, 400, jsonError("Corrupt preset"), "application/json"); return; }
+        { send(client, 400, jsonError("Unsupported or invalid preset"), "application/json"); return; }
         if (path == "/api/startup")
         {
             if (!selectStartup || !selectStartup(file))
