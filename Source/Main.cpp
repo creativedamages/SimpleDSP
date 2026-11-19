@@ -637,10 +637,18 @@ public:
     std::function<void(int, bool)> onClipClear;
     std::function<void()> onLayoutChanged;
 
+    void fitViewport(int width, int visibleHeight)
+    {
+        const int spaceForGraph = visibleHeight - 2 * padding - rowHeight(headerHeight)
+            - rowHeight(routesHeight) - rowHeight(meterHeight);
+        graphHeight = std::min(juce::jlimit(165, 225, width / 2), std::max(125, spaceForGraph));
+        setSize(width, preferredHeight(width));
+    }
+
     int preferredHeight(int width) const noexcept
     {
         int height = 2 * padding + rowHeight(headerHeight) + rowHeight(routesHeight)
-            + rowHeight(meterHeight) + rowHeight(graphHeight(width)) + rowHeight(buttonHeight)
+            + rowHeight(meterHeight) + rowHeight(graphHeight) + rowHeight(buttonHeight)
             + 3 * rowHeight(disclosureHeight);
         if (sweepOnSeparateRow(width)) height += rowHeight(buttonHeight);
         if (controlsExpanded) height += 2 * rowHeight(buttonHeight);
@@ -721,7 +729,7 @@ public:
         output.setBounds(routes);
 
         meters.setBounds(nextRow(meterHeight));
-        graph.setBounds(nextRow(graphHeight(getWidth())));
+        graph.setBounds(nextRow(graphHeight));
 
         auto switches = nextRow(buttonHeight);
         if (sweepOnSeparateRow(getWidth()))
@@ -766,7 +774,7 @@ private:
     static constexpr int headerHeight = 34, routesHeight = 46, meterHeight = 57;
     static constexpr int buttonHeight = 28, disclosureHeight = 30, filterHeight = 65;
     static int rowHeight(int height) noexcept { return height + gap; }
-    static int graphHeight(int width) noexcept { return juce::jlimit(165, 225, width / 2); }
+    int graphHeight = 165;
     static bool sweepOnSeparateRow(int width) noexcept { return width < 400; }
 
     void updateMuteButton()
@@ -846,7 +854,7 @@ private:
     {
         auto& viewport = viewports[ch];
         const int width = std::max(0, viewport.getWidth() - viewport.getScrollBarThickness());
-        channels[ch]->setSize(width, channels[ch]->preferredHeight(width));
+        channels[ch]->fitViewport(width, viewport.getHeight());
     }
 
     std::array<std::unique_ptr<ChannelStrip>, htdsp::channelCount> channels;
