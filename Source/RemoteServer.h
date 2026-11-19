@@ -1,5 +1,6 @@
 #pragma once
 #include <JuceHeader.h>
+#include <SimpleDSPResources.h>
 #include "RemotePage.h"
 #include "ProjectSettings.h"
 #include <atomic>
@@ -159,8 +160,31 @@ private:
         if (method == "GET" && path == "/manifest.webmanifest")
         {
             send(client, 200,
-                R"JSON({"name":"SimpleDSP","short_name":"SimpleDSP","start_url":"/","scope":"/","display":"standalone","background_color":"#111821","theme_color":"#111821"})JSON",
+                R"JSON({"name":"SimpleDSP","short_name":"SimpleDSP","start_url":"/","scope":"/","display":"standalone","background_color":"#111821","theme_color":"#111821","icons":[{"src":"/icon-192.png","sizes":"192x192","type":"image/png"},{"src":"/icon-512.png","sizes":"512x512","type":"image/png"}]})JSON",
                 "application/manifest+json"); return;
+        }
+        if (method == "GET")
+        {
+            // The icons are public assets, including on the PIN screen.
+            struct Icon
+            {
+                const char* path;
+                const char* data;
+                int size;
+            };
+            using namespace SimpleDSPAssets;
+            const Icon icons[] {
+                { "/favicon-32.png", favicon32_png, favicon32_pngSize },
+                { "/apple-touch-icon.png", appletouchicon_png, appletouchicon_pngSize },
+                { "/icon-192.png", icon192_png, icon192_pngSize },
+                { "/icon-512.png", icon512_png, icon512_pngSize }
+            };
+            for (const auto& icon : icons)
+                if (path == icon.path)
+                {
+                    send(client, 200, std::string(icon.data, static_cast<std::size_t>(icon.size)), "image/png");
+                    return;
+                }
         }
         bool authorised = !requiresPin.load();
         if (!authorised)

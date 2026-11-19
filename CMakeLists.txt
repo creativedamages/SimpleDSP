@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(SimpleDSP VERSION 0.4.1 LANGUAGES C CXX)
+project(SimpleDSP VERSION 0.4.2 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -19,7 +19,19 @@ FetchContent_MakeAvailable(juce)
 juce_add_gui_app(SimpleDSP
   PRODUCT_NAME "SimpleDSP"
   COMPANY_NAME "RobbyApps"
+  ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon-512.png"
+  ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon-192.png"
   BUNDLE_ID "com.robbyapps.htdsp"
+)
+
+juce_add_binary_data(SimpleDSPResources
+  HEADER_NAME SimpleDSPResources.h
+  NAMESPACE SimpleDSPAssets
+  SOURCES
+    assets/favicon-32.png
+    assets/apple-touch-icon.png
+    assets/icon-192.png
+    assets/icon-512.png
 )
 
 # JUCE reads narrow C++ string literals as UTF-8. MSVC otherwise uses the
@@ -40,6 +52,7 @@ target_compile_definitions(SimpleDSP PRIVATE
   JUCE_WEB_BROWSER=0
 )
 target_link_libraries(SimpleDSP PRIVATE
+  SimpleDSPResources
   juce::juce_audio_utils
   juce::juce_gui_extra
   juce::juce_recommended_config_flags

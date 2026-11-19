@@ -2,6 +2,7 @@
 #include "DSP.h"
 #include "Analysis.h"
 #include "RemoteServer.h"
+#include <SimpleDSPResources.h>
 #include <array>
 #include <bitset>
 #include "ProjectSettings.h"
@@ -857,6 +858,10 @@ public:
         addAndMakeVisible(generatorLevel);
         addAndMakeVisible(generatorFrequency);
 
+        logo.setImage(juce::ImageCache::getFromMemory(SimpleDSPAssets::icon192_png,
+                                                      SimpleDSPAssets::icon192_pngSize),
+                      juce::RectanglePlacement::centred);
+        addAndMakeVisible(logo);
         title.setText("SimpleDSP", juce::dontSendNotification);
         title.setFont(juce::Font(juce::FontOptions(28.0f, juce::Font::bold)));
         title.setColour(juce::Label::textColourId, juce::Colours::white);
@@ -1056,8 +1061,10 @@ public:
     {
         auto bounds = getLocalBounds().reduced(20);
         auto top = bounds.removeFromTop(159);
-        auto headingRow = top.removeFromTop(40);
-        title.setBounds(headingRow.removeFromLeft(345));
+        auto headingRow = top.removeFromTop(48);
+        auto brand = headingRow.removeFromLeft(345);
+        logo.setBounds(brand.removeFromLeft(52).withSizeKeepingCentre(44, 44));
+        title.setBounds(brand);
         subtitle.setBounds(headingRow);
         auto controls = top.removeFromTop(39);
         savePreset.setBounds(controls.removeFromLeft(114).reduced(3, 1));
@@ -1107,6 +1114,7 @@ private:
     juce::ComboBox generatorMode;
     juce::Slider generatorLevel, generatorFrequency;
     juce::ComboBox channelSelect;
+    juce::ImageComponent logo;
     juce::Label title, subtitle, info, deviceLabel, remoteInfo, startupStatus;
     juce::TextButton savePreset, loadPreset, chooseStartup;
     juce::ToggleButton loadOnLaunch, startWithWindows, pinRequiredToggle;
