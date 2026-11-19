@@ -4,7 +4,6 @@
 #include "RemoteServer.h"
 #include <SimpleDSPResources.h>
 #include <array>
-#include <bitset>
 #include "ProjectSettings.h"
 #include "TestSignal.h"
 #include "SineSweep.h"
@@ -263,15 +262,27 @@ public:
         g.fillRoundedRectangle(getLocalBounds().toFloat(), 7.0f);
     }
 
+    static int preferredHeight(int width) noexcept { return width < 352 ? 66 : 44; }
+
     void resized() override
     {
-        auto area = getLocalBounds().reduced(8, 6);
-        const int total = area.getWidth();
-        number.setBounds(area.removeFromLeft(49));
-        const int content = total - 49;
-        frequency.setBounds(area.removeFromLeft(static_cast<int>(content * 0.40)));
-        gain.setBounds(area.removeFromLeft(static_cast<int>(content * 0.31)));
-        q.setBounds(area);
+        auto area = getLocalBounds().reduced(8, 5);
+        if (getWidth() < 352)
+        {
+            auto frequencyRow = area.removeFromTop(area.getHeight() / 2);
+            number.setBounds(frequencyRow.removeFromLeft(45));
+            frequency.setBounds(frequencyRow);
+            gain.setBounds(area.removeFromLeft(area.getWidth() / 2));
+            q.setBounds(area);
+        }
+        else
+        {
+            number.setBounds(area.removeFromLeft(45));
+            const int content = area.getWidth();
+            frequency.setBounds(area.removeFromLeft(content * 40 / 100));
+            gain.setBounds(area.removeFromLeft(content * 31 / 100));
+            q.setBounds(area);
+        }
     }
 
 private:
@@ -340,7 +351,8 @@ public:
         g.fillRoundedRectangle(getLocalBounds().toFloat(), 7);
         g.setFont(11.0f);
         g.setColour(mutedColour);
-        g.drawText("INPUT SAMPLE PEAK  /  OUTPUT TRUE PEAK", 10, 2, 300, 14, juce::Justification::centredLeft);
+        g.drawFittedText("INPUT SAMPLE PEAK  /  OUTPUT TRUE PEAK", 10, 2, getWidth() - 20, 14,
+                         juce::Justification::centredLeft, 1);
         drawMeter(g, 19, "IN", values.inputPeak, values.inputRms, values.inputClip, inputSignalColour);
         drawMeter(g, 38, "OUT", values.outputPeak, values.outputRms, values.outputClip, outputSignalColour, " dBTP");
     }
@@ -508,7 +520,7 @@ public:
         : channelNumber(number), params(channelParams)
     {
         heading.setText("CH " + juce::String(number), juce::dontSendNotification);
-        heading.setFont(juce::Font(juce::FontOptions(23.0f, juce::Font::bold)));
+        heading.setFont(juce::Font(juce::FontOptions(20.0f, juce::Font::bold)));
         heading.setColour(juce::Label::textColourId, juce::Colours::white);
         addAndMakeVisible(heading);
         name.setText("Channel " + juce::String(number), false);
@@ -586,7 +598,8 @@ public:
         {
             if (onTestInputChange) onTestInputChange(channelNumber - 1, testInput.getToggleState());
         };
-        polarity.setButtonText("Invert polarity (180 deg)");
+        polarity.setButtonText("Invert polarity");
+        polarity.setTooltip("Invert polarity (180 degrees)");
         polarity.setToggleState(params.invertPolarity.load(), juce::dontSendNotification);
         polarity.setColour(juce::ToggleButton::tickColourId, accentColour);
         polarity.onClick = [this] { params.invertPolarity.store(polarity.getToggleState()); };
@@ -598,10 +611,6 @@ public:
             updateExpandedSections();
         };
         addAndMakeVisible(eqToggle);
-        headingLabels.setText("FREQUENCY                         GAIN                         Q", juce::dontSendNotification);
-        headingLabels.setColour(juce::Label::textColourId, mutedColour);
-        addAndMakeVisible(headingLabels);
-
         for (int i = 0; i < dualdsp::kBands; ++i)
         {
             eqRows[static_cast<std::size_t>(i)] = std::make_unique<EqRow>(i, params.eq[static_cast<std::size_t>(i)]);
@@ -628,11 +637,16 @@ public:
     std::function<void(int, bool)> onClipClear;
     std::function<void()> onLayoutChanged;
 
-    int preferredHeight() const noexcept
+    int preferredHeight(int width) const noexcept
     {
-        const int filterY = controlsExpanded ? 640 : 541;
-        const int eqY = filterY + (filtersExpanded ? 192 : 43);
-        return eqY + (eqExpanded ? 451 : 49);
+        int height = 2 * padding + rowHeight(headerHeight) + rowHeight(routesHeight)
+            + rowHeight(meterHeight) + rowHeight(graphHeight(width)) + rowHeight(buttonHeight)
+            + 3 * rowHeight(disclosureHeight);
+        if (sweepOnSeparateRow(width)) height += rowHeight(buttonHeight);
+        if (controlsExpanded) height += 2 * rowHeight(buttonHeight);
+        if (filtersExpanded) height += 2 * rowHeight(filterHeight);
+        if (eqExpanded) height += dualdsp::kBands * rowHeight(EqRow::preferredHeight(width - 2 * padding));
+        return height - gap;
     }
 
     void sync(const juce::String& newName)
@@ -644,7 +658,6 @@ public:
         updateMuteButton();
         hp.sync(); lp.sync();
         for (auto& e : eqRows) e->sync();
-        graph.repaint();
     }
     void setGraphSampleRate(double sr) { graph.setSampleRate(sr); }
     void setTelemetry(const dualdsp::LiveLevels& levels,
@@ -680,43 +693,82 @@ public:
     {
         g.setColour(panelColour);
         g.fillRoundedRectangle(getLocalBounds().toFloat(), 13.0f);
-        g.setColour(accentColour.withAlpha(0.65f));
-        g.fillRoundedRectangle(20.0f, 87.0f, static_cast<float>(getWidth() - 40), 2.0f, 1.0f);
     }
 
     void resized() override
     {
-        const int w = getWidth();
-        heading.setBounds(22, 18, 108, 37);
-        name.setBounds(132, 18, w - 277, 34);
-        muteButton.setBounds(w - 133, 18, 110, 35);
-        const int half = (w - 56) / 2;
-        inputCaption.setBounds(22, 95, half, 19);
-        outputCaption.setBounds(34 + half, 95, half, 19);
-        input.setBounds(22, 119, half, 31);
-        output.setBounds(34 + half, 119, half, 31);
-        meters.setBounds(18, 158, w - 36, 57);
-        polarity.setBounds(24, 226, 240, 30);
-        testInput.setBounds(245, 226, 165, 30);
-        sweepButton.setBounds(w - 145, 226, 125, 30);
-        graph.setBounds(20, 267, w - 40, 225);
-        levelDelayToggle.setBounds(22, 501, w - 44, 31);
-        levelCaption.setBounds(22, 546, 110, 22);
-        delayCaption.setBounds(22, 590, 110, 22);
-        level.setBounds(131, 540, w - 153, 36);
-        delay.setBounds(131, 584, w - 153, 36);
-        const int filterY = controlsExpanded ? 640 : 541;
-        filtersToggle.setBounds(22, filterY, w - 44, 31);
-        hp.setBounds(18, filterY + 36, w - 36, 70);
-        lp.setBounds(18, filterY + 112, w - 36, 70);
-        const int eqY = filterY + (filtersExpanded ? 192 : 43);
-        eqToggle.setBounds(22, eqY, w - 44, 31);
-        headingLabels.setBounds(70, eqY + 29, w - 85, 22);
-        for (int i = 0; i < dualdsp::kBands; ++i)
-            eqRows[static_cast<std::size_t>(i)]->setBounds(18, eqY + 54 + i * 65, w - 36, 59);
+        if (getWidth() == 0) return;
+        auto area = getLocalBounds().reduced(padding);
+        const auto nextRow = [&area](int height)
+        {
+            const auto row = area.removeFromTop(height);
+            area.removeFromTop(gap);
+            return row;
+        };
+
+        auto header = nextRow(headerHeight);
+        heading.setBounds(header.removeFromLeft(64));
+        muteButton.setBounds(header.removeFromRight(96));
+        header.removeFromRight(gap);
+        name.setBounds(header);
+
+        auto routes = nextRow(routesHeight);
+        auto inputRoute = routes.removeFromLeft((routes.getWidth() - gap) / 2);
+        routes.removeFromLeft(gap);
+        inputCaption.setBounds(inputRoute.removeFromTop(18));
+        outputCaption.setBounds(routes.removeFromTop(18));
+        input.setBounds(inputRoute);
+        output.setBounds(routes);
+
+        meters.setBounds(nextRow(meterHeight));
+        graph.setBounds(nextRow(graphHeight(getWidth())));
+
+        auto switches = nextRow(buttonHeight);
+        if (sweepOnSeparateRow(getWidth()))
+        {
+            auto sweepRow = nextRow(buttonHeight);
+            sweepButton.setBounds(sweepRow.removeFromLeft(110));
+        }
+        else
+        {
+            sweepButton.setBounds(switches.removeFromRight(110));
+            switches.removeFromRight(gap);
+        }
+        polarity.setBounds(switches.removeFromLeft(switches.getWidth() / 2));
+        testInput.setBounds(switches);
+
+        levelDelayToggle.setBounds(nextRow(disclosureHeight));
+        if (controlsExpanded)
+        {
+            auto levelRow = nextRow(buttonHeight);
+            levelCaption.setBounds(levelRow.removeFromLeft(58));
+            level.setBounds(levelRow);
+            auto delayRow = nextRow(buttonHeight);
+            delayCaption.setBounds(delayRow.removeFromLeft(58));
+            delay.setBounds(delayRow);
+        }
+
+        filtersToggle.setBounds(nextRow(disclosureHeight));
+        if (filtersExpanded)
+        {
+            hp.setBounds(nextRow(filterHeight));
+            lp.setBounds(nextRow(filterHeight));
+        }
+
+        eqToggle.setBounds(nextRow(disclosureHeight));
+        if (eqExpanded)
+            for (auto& eq : eqRows)
+                eq->setBounds(nextRow(EqRow::preferredHeight(area.getWidth())));
     }
 
 private:
+    static constexpr int padding = 12, gap = 8;
+    static constexpr int headerHeight = 34, routesHeight = 46, meterHeight = 57;
+    static constexpr int buttonHeight = 28, disclosureHeight = 30, filterHeight = 65;
+    static int rowHeight(int height) noexcept { return height + gap; }
+    static int graphHeight(int width) noexcept { return juce::jlimit(165, 225, width / 2); }
+    static bool sweepOnSeparateRow(int width) noexcept { return width < 400; }
+
     void updateMuteButton()
     {
         const bool muted = generatorMuted || params.outputMuted.load();
@@ -733,7 +785,6 @@ private:
         levelDelayToggle.setButtonText(controlsExpanded ? "Hide level / delay" : "Show level / delay");
         hp.setVisible(filtersExpanded);
         lp.setVisible(filtersExpanded);
-        headingLabels.setVisible(eqExpanded);
         for (auto& row : eqRows) if (row) row->setVisible(eqExpanded);
         filtersToggle.setButtonText(filtersExpanded ? "Hide filters - High-pass / Low-pass" :
                                                        "Show filters - High-pass / Low-pass");
@@ -745,7 +796,7 @@ private:
     bool controlsExpanded = false, filtersExpanded = false, eqExpanded = false;
     int channelNumber;
     dualdsp::ChannelSettings& params;
-    juce::Label heading, inputCaption, outputCaption, levelCaption, delayCaption, headingLabels;
+    juce::Label heading, inputCaption, outputCaption, levelCaption, delayCaption;
     juce::TextButton filtersToggle, eqToggle, levelDelayToggle, muteButton;
     juce::TextEditor name;
     ResponseGraph graph { params };
@@ -765,44 +816,41 @@ class StripArea final : public juce::Component
 public:
     explicit StripArea(std::array<dualdsp::ChannelSettings, htdsp::channelCount>& settings)
     {
-        for (int i = 0; i < htdsp::channelCount; ++i)
+        for (int ch = 0; ch < htdsp::channelCount; ++ch)
         {
-            channels[i] = std::make_unique<ChannelStrip>(i + 1, settings[i]);
-            addChildComponent(*channels[i]);
-            channels[i]->onLayoutChanged = [this, i]
-            {
-                if (selected == i) refreshHeight();
-            };
+            channels[ch] = std::make_unique<ChannelStrip>(ch + 1, settings[ch]);
+            viewports[ch].setViewedComponent(channels[ch].get(), false);
+            viewports[ch].setScrollBarsShown(true, false);
+            addAndMakeVisible(viewports[ch]);
+            channels[ch]->onLayoutChanged = [this, ch] { resizeChannel(ch); };
         }
-        channels[selected]->setVisible(true);
-        refreshHeight();
     }
 
-    void select(int index)
-    {
-        channels[selected]->setVisible(false);
-        selected = index;
-        channels[selected]->setVisible(true);
-        refreshHeight();
-        resized();
-    }
-
-    int selectedChannel() const noexcept { return selected; }
     ChannelStrip& operator[](int index) noexcept { return *channels[index]; }
-
-    void refreshHeight()
-    {
-        setSize(juce::jmax(565, getWidth()), channels[selected]->preferredHeight());
-    }
 
     void resized() override
     {
-        channels[selected]->setBounds(getLocalBounds());
+        constexpr int gutter = 12;
+        auto area = getLocalBounds();
+        const int channelWidth = (getWidth() - gutter * (htdsp::channelCount - 1)) / htdsp::channelCount;
+        for (int ch = 0; ch < htdsp::channelCount; ++ch)
+        {
+            viewports[ch].setBounds(ch == htdsp::channelCount - 1 ? area : area.removeFromLeft(channelWidth));
+            area.removeFromLeft(gutter);
+            resizeChannel(ch);
+        }
     }
 
 private:
+    void resizeChannel(int ch)
+    {
+        auto& viewport = viewports[ch];
+        const int width = std::max(0, viewport.getWidth() - viewport.getScrollBarThickness());
+        channels[ch]->setSize(width, channels[ch]->preferredHeight(width));
+    }
+
     std::array<std::unique_ptr<ChannelStrip>, htdsp::channelCount> channels;
-    int selected = 0;
+    std::array<juce::Viewport, htdsp::channelCount> viewports;
 };
 
 class MainComponent final : public juce::Component, private juce::Timer
@@ -823,17 +871,6 @@ public:
             lastValidInput[ch] = lastValidOutput[ch] = -1;
             engine.parameters[ch].outputMuted.store(true);
         }
-        channelSelect.setTitle("DSP channel");
-        channelSelect.onChange = [this]
-        {
-            const int selected = channelSelect.getSelectedId() - 1;
-            if (selected < 0 || selected >= htdsp::channelCount) return;
-            strips.select(selected);
-            contentViewport.setViewPosition(0, 0);
-            syncStrips();
-        };
-        addAndMakeVisible(channelSelect);
-
         stopSweep.setButtonText("Stop sweep");
         stopSweep.onClick = [this] { engine.sweepStop.store(true); };
         addAndMakeVisible(stopSweep);
@@ -940,10 +977,8 @@ public:
         selector.setSize(295, 790);
         deviceViewport.setViewedComponent(&selector, false);
         deviceViewport.setScrollBarsShown(true, false);
-        contentViewport.setViewedComponent(&strips, false);
-        contentViewport.setScrollBarsShown(true, true);
         addAndMakeVisible(deviceViewport);
-        addAndMakeVisible(contentViewport);
+        addAndMakeVisible(strips);
         for (int ch = 0; ch < htdsp::channelCount; ++ch)
         {
             strips[ch].onSweep = [this](int channel)
@@ -1053,7 +1088,6 @@ public:
         deviceManager.removeAudioCallback(&engine);
         saveAudioDeviceState();
         deviceViewport.setViewedComponent(nullptr, false);
-        contentViewport.setViewedComponent(nullptr, false);
     }
 
     void paint(juce::Graphics& g) override { g.fillAll(backgroundColour); }
@@ -1088,11 +1122,7 @@ public:
         deviceLabel.setBounds(sidebar.removeFromTop(28));
         deviceViewport.setBounds(sidebar.reduced(2));
         bounds.removeFromLeft(15);
-        auto channelRow = bounds.removeFromTop(30);
-        channelSelect.setBounds(channelRow.removeFromLeft(330));
-        bounds.removeFromTop(8);
-        contentViewport.setBounds(bounds);
-        strips.setSize(juce::jmax(565, contentViewport.getMaximumVisibleWidth()), strips.getHeight());
+        strips.setBounds(bounds);
     }
 
 private:
@@ -1106,14 +1136,13 @@ private:
     std::array<std::array<float, dualdsp::kRtaBins>, htdsp::channelCount> publishedRta {};
     std::array<std::array<float, dualdsp::kRtaBins>, htdsp::channelCount> publishedInputRta {};
     juce::AudioDeviceSelectorComponent selector;
-    juce::Viewport deviceViewport, contentViewport;
+    juce::Viewport deviceViewport;
     StripArea strips;
     juce::TextButton stopSweep;
     juce::Label sweepStatus;
     juce::ToggleButton generatorEnabled;
     juce::ComboBox generatorMode;
     juce::Slider generatorLevel, generatorFrequency;
-    juce::ComboBox channelSelect;
     juce::ImageComponent logo;
     juce::Label title, subtitle, info, deviceLabel, remoteInfo, startupStatus;
     juce::TextButton savePreset, loadPreset, chooseStartup;
@@ -1137,7 +1166,6 @@ private:
     juce::StringArray lastInputs, lastOutputs;
     std::array<int, htdsp::channelCount> lastValidInput, lastValidOutput;
     bool suppressUpdates = false;
-    mutable std::atomic<unsigned int> requestedSpectra { 0 };
 
     static juce::File appFolder()
     {
@@ -1300,14 +1328,9 @@ private:
     void timerCallback() override
     {
         updateDeviceRouting(false);
-        const int selected = strips.selectedChannel();
         if (auto* device = deviceManager.getCurrentAudioDevice())
             graphSampleRate.store(device->getCurrentSampleRate());
         const auto rate = graphSampleRate.load();
-        strips[selected].setGraphSampleRate(rate);
-
-        // Compute spectra for the visible strip and any strip a phone is viewing.
-        const std::bitset<htdsp::channelCount> analyze(requestedSpectra.exchange(0) | (1u << selected));
 
         for (int ch = 0; ch < htdsp::channelCount; ++ch)
         {
@@ -1316,11 +1339,12 @@ private:
             levels.outputPeak = std::max(levels.outputPeak, displayLevels[ch].outputPeak - 1.5f);
             displayLevels[ch] = levels;
 
-            if (analyze.test(ch))
-            {
-                inputSpectrumAnalyzers[ch].update(engine.telemetry[ch], rate, true);
-                outputSpectrumAnalyzers[ch].update(engine.telemetry[ch], rate, false);
-            }
+            // Both Windows strips and the phone remote share the same spectra.
+            inputSpectrumAnalyzers[ch].update(engine.telemetry[ch], rate, true);
+            outputSpectrumAnalyzers[ch].update(engine.telemetry[ch], rate, false);
+            strips[ch].setGraphSampleRate(rate);
+            strips[ch].setTelemetry(levels, inputSpectrumAnalyzers[ch].getBins(),
+                                    outputSpectrumAnalyzers[ch].getBins());
         }
 
         {
@@ -1328,15 +1352,13 @@ private:
             publishedLevels = displayLevels;
             for (int ch = 0; ch < htdsp::channelCount; ++ch)
             {
-                if (!analyze.test(ch)) continue;
                 publishedInputRta[ch] = inputSpectrumAnalyzers[ch].getBins();
                 publishedRta[ch] = outputSpectrumAnalyzers[ch].getBins();
             }
         }
-        strips[selected].setTelemetry(displayLevels[selected], inputSpectrumAnalyzers[selected].getBins(),
-                                      outputSpectrumAnalyzers[selected].getBins());
         syncStrips();
     }
+
     void setName(int ch, juce::String n)
     {
         if (ch < 0 || ch >= htdsp::channelCount) return;
@@ -1369,9 +1391,9 @@ private:
         stopSweep.setEnabled(sweeping >= 0);
         sweepStatus.setText(sweeping >= 0 ? "Sweeping CH " + juce::String(sweeping + 1) + " - others muted" : "",
                            juce::dontSendNotification);
-        for (int ch = 0; ch < htdsp::channelCount; ++ch) strips[ch].setSweepState(sweeping);
 
-        generatorEnabled.setToggleState(engine.testSettings.enabled.load(), juce::dontSendNotification);
+        const bool generatorOn = engine.testSettings.enabled.load();
+        generatorEnabled.setToggleState(generatorOn, juce::dontSendNotification);
         generatorMode.setSelectedId(engine.testSettings.mode.load() + 1, juce::dontSendNotification);
         if (!generatorLevel.isMouseButtonDown())
             generatorLevel.setValue(engine.testSettings.levelDb.load(), juce::dontSendNotification);
@@ -1386,18 +1408,12 @@ private:
         }
         for (int ch = 0; ch < htdsp::channelCount; ++ch)
         {
-            const auto label = "CH " + juce::String(ch + 1) + "  -  " + currentNames[ch];
-            if (channelSelect.getItemText(ch) == label) continue;
-            if (channelSelect.getNumItems() <= ch) channelSelect.addItem(label, ch + 1);
-            else channelSelect.changeItemText(ch + 1, label);
+            const bool testSelected = engine.testInputs[ch].load();
+            strips[ch].setSweepState(sweeping);
+            strips[ch].setGeneratorMuted(sweeping < 0 && generatorOn && !testSelected);
+            strips[ch].setTestInput(testSelected);
+            strips[ch].sync(currentNames[ch]);
         }
-        const int selected = strips.selectedChannel();
-        if (channelSelect.getSelectedId() != selected + 1)
-            channelSelect.setSelectedId(selected + 1, juce::dontSendNotification);
-        strips[selected].setGeneratorMuted(sweeping < 0 && engine.testSettings.enabled.load()
-                                          && !engine.testInputs[selected].load());
-        strips[selected].setTestInput(engine.testInputs[selected].load());
-        strips[selected].sync(currentNames[selected]);
     }
 
     void saveAudioDeviceState() const
@@ -1586,7 +1602,6 @@ private:
 
     juce::String getTelemetryJson(int channel) const
     {
-        requestedSpectra.fetch_or(1u << channel);
         dualdsp::LiveLevels levels;
         std::array<float, dualdsp::kRtaBins> output, input;
         {
@@ -1796,8 +1811,11 @@ private:
             setUsingNativeTitleBar(true);
             setContentOwned(new MainComponent(), true);
             setResizable(true, true);
-            setResizeLimits(980, 650, 2400, 1400);
-            centreWithSize(1120, 875);
+            setResizeLimits(960, 580, 2400, 1400);
+            const auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay();
+            const auto available = display != nullptr ? display->userBounds.toNearestInt()
+                                                      : juce::Rectangle<int>(1280, 875);
+            centreWithSize(std::min(1280, available.getWidth()), std::min(875, available.getHeight()));
             setVisible(true);
         }
         void closeButtonPressed() override

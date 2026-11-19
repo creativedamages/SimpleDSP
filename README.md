@@ -1,6 +1,6 @@
 # SimpleDSP
 
-SimpleDSP is a standalone Windows 10/11 x64 audio processor with two independent mono channels. Select an ASIO or WASAPI device, then select CH 1 or CH 2 in the channel picker to edit its input and output routes. Channels can share an input. Each physical output can serve one DSP channel. The device and driver determine how many physical inputs and outputs are available.
+SimpleDSP is a standalone Windows 10/11 x64 audio processor with two independent mono channels. Select an ASIO or WASAPI device, then set the input and output routes for CH 1 and CH 2 in the side-by-side Windows strips. Both strips show live meters and spectra and scroll independently. Channels can share an input. Each physical output can serve one DSP channel. The device and driver determine how many physical inputs and outputs are available.
 
 Each channel has six parametric EQ bands, high- and low-pass filters, 0–50 ms of delay in 0.25 ms steps, gain, polarity, and output mute. Delay rounds to the nearest sample at the device rate. Live delay and filter changes use short crossfades. Input metering reads sample peak in dBFS. Output metering estimates true peak in dBTP with 4× interpolation. Both have independent, clearable overload indicators. Leave output headroom when boosting EQ or gain. The EQ graph overlays the measured input in cyan and output in pink. New sessions start with outputs muted until you unmute them or load a preset with saved mute states.
 
